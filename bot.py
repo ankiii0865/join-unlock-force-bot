@@ -51,10 +51,17 @@ logger = logging.getLogger("ForceHub")
 # ENVIRONMENT CONFIG
 # ─────────────────────────────────────────────────────────────────
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+
+# ── HARDCODED SUPER ADMINS — these ALWAYS have full access ────────
+# @chamgaadar | ANKIII YADAV | ID: 5695957392
+SUPER_ADMIN_IDS: List[int] = [5695957392]
+
 ADMIN_IDS_RAW = os.getenv("ADMIN_IDS", "")
-ADMIN_IDS: List[int] = [
+_env_admins: List[int] = [
     int(x.strip()) for x in ADMIN_IDS_RAW.split(",") if x.strip().isdigit()
 ]
+# Merge: super admins + env admins (deduplicated)
+ADMIN_IDS: List[int] = list({*SUPER_ADMIN_IDS, *_env_admins})
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data"))
 DATA_FILE = DATA_DIR / "forcehub_data.json"
@@ -353,7 +360,14 @@ db = DataManager()
 # ─────────────────────────────────────────────────────────────────
 
 def is_admin(user_id: int) -> bool:
+    """Super admins hardcoded — ALWAYS returns True for them regardless of DB."""
+    if user_id in SUPER_ADMIN_IDS:
+        return True
     return user_id in ADMIN_IDS or user_id in db.settings.get("admin_ids", [])
+
+
+def is_super_admin(user_id: int) -> bool:
+    return user_id in SUPER_ADMIN_IDS
 
 
 def is_creator(user_id: int) -> bool:
@@ -505,25 +519,43 @@ def kb_user() -> InlineKeyboardMarkup:
 def kb_creator() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📊 Dashboard",          callback_data="c_dash")],
-        [InlineKeyboardButton("➕ Setup Material",     callback_data="c_setup"),
+        [InlineKeyboardButton("➕ New Campaign",        callback_data="c_setup"),
          InlineKeyboardButton("📦 Materials",          callback_data="c_materials")],
-        [InlineKeyboardButton("📢 Channels",           callback_data="c_channels"),
-         InlineKeyboardButton("📈 Stats",              callback_data="c_stats")],
-        [InlineKeyboardButton("📣 Broadcast Users",    callback_data="c_broadcast")],
-        [InlineKeyboardButton("🔄 Renew Panel",        callback_data="c_renew")],
+        [InlineKeyboardButton("🎯 My Campaigns",       callback_data="c_campaigns"),
+         InlineKeyboardButton("📈 Analytics",          callback_data="c_stats")],
+        [InlineKeyboardButton("📢 My Channels",        callback_data="c_channels"),
+         InlineKeyboardButton("📣 Broadcast",          callback_data="c_broadcast")],
+        [InlineKeyboardButton("🔗 Get Share Links",    callback_data="c_links"),
+         InlineKeyboardButton("🔄 Renew Panel",        callback_data="c_renew")],
+        [InlineKeyboardButton("❓ Help",               callback_data="c_help")],
     ])
 
 
 def kb_admin() -> InlineKeyboardMarkup:
+    """Main admin home panel."""
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🛡️ Admin Panel",        callback_data="a_panel")],
-        [InlineKeyboardButton("📊 Global Stats",       callback_data="a_stats"),
-         InlineKeyboardButton("📣 Broadcast",          callback_data="a_broadcast")],
-        [InlineKeyboardButton("📤 Export Data",        callback_data="a_export"),
-         InlineKeyboardButton("🚫 Ban Creator",        callback_data="a_ban")],
-        [InlineKeyboardButton("💰 Set Price",          callback_data="a_price"),
-         InlineKeyboardButton("⏱ Set Trial",           callback_data="a_trial")],
-        [InlineKeyboardButton("💳 Set UPI",            callback_data="a_upi")],
+        [InlineKeyboardButton("📊 Stats & Analytics",   callback_data="a_stats"),
+         InlineKeyboardButton("📣 Broadcast",           callback_data="a_broadcast")],
+        [InlineKeyboardButton("👥 All Users",           callback_data="a_users_0"),
+         InlineKeyboardButton("🎨 All Creators",        callback_data="a_creators_0")],
+        [InlineKeyboardButton("🎯 All Campaigns",       callback_data="a_campaigns_0"),
+         InlineKeyboardButton("📦 All Materials",       callback_data="a_materials_0")],
+        [InlineKeyboardButton("➕ Add Creator",         callback_data="a_addcreator_prompt"),
+         InlineKeyboardButton("🚫 Ban Creator",         callback_data="a_ban_prompt")],
+        [InlineKeyboardButton("💬 DM Any User",         callback_data="a_dm_prompt"),
+         InlineKeyboardButton("🗑 Del Campaign",        callback_data="a_delcamp_prompt")],
+        [InlineKeyboardButton("⚙️ Settings",            callback_data="a_settings"),
+         InlineKeyboardButton("📤 Export JSON",         callback_data="a_export")],
+    ])
+
+
+def kb_admin_settings() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"⏱ Set Trial Days",     callback_data="a_trial"),
+         InlineKeyboardButton(f"💰 Set Price",          callback_data="a_price")],
+        [InlineKeyboardButton(f"💳 Set UPI",            callback_data="a_upi"),
+         InlineKeyboardButton(f"👑 Add Admin",          callback_data="a_addadmin_prompt")],
+        [InlineKeyboardButton("🔙 Back",                callback_data="a_panel")],
     ])
 
 
@@ -579,16 +611,25 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif len(arg) == 8 and arg.isupper():
             return await _handle_campaign(update, context, arg)
 
-    # ── Show appropriate menu ─────────────────────────────────────
+    # ── Show appropriate menu — ADMIN CHECK ALWAYS FIRST ────────────
     if is_admin(uid):
         s = db.global_stats()
+        badge = "👑 *SUPER ADMIN*" if is_super_admin(uid) else "🛡️ *Admin*"
         await update.message.reply_text(
-            f"👋 Welcome back, *{user.first_name}*!\n\n"
-            f"🛡️ *Super Admin Panel — ForceHub*\n"
-            f"━━━━━━━━━━━━━━━━━━━\n"
-            f"👥 Users: `{s['total_users']}` | "
-            f"🎨 Creators: `{s['total_creators']}`\n"
-            f"🎯 Campaigns: `{s['total_campaigns']}`",
+            f"{badge} — ForceHub\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"👋 Welcome back, *{user.first_name}*!\n"
+            f"🆔 Your ID: `{uid}`\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"👥 Users:     `{s['total_users']}`  |  🎨 Creators: `{s['total_creators']}`\n"
+            f"🎯 Campaigns: `{s['total_campaigns']}` |  📦 Materials: `{s['total_materials']}`\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🆕 Today Joins: `{s['today_joins']}` | 🔓 Unlocks: `{s['today_unlocks']}`\n"
+            f"⏱ Trial: `{db.settings.get('trial_days',90)}d` | "
+            f"💰 ₹`{db.settings.get('price',199)}` | "
+            f"💳 `{db.settings.get('upi_id','Not set')}`\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🕐 `{now_str()}`",
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=kb_admin(),
         )
@@ -915,53 +956,465 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["cbcast_step"] = "content"
         await query.edit_message_text(
             "📣 *Broadcast to Your Users*\n\n"
-            "Send the content to broadcast.\n"
-            "Supports: text, photo, video, document (with optional caption)\n\n"
-            "Send your content now:",
+            "Send your content (text / photo / video / document).\n"
+            "Captions supported for media.\n\n"
+            "👇 Send now:",
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=InlineKeyboardMarkup(
                 [[InlineKeyboardButton("❌ Cancel", callback_data="c_dash")]]
             ),
         )
 
+    # ── NEW: My Campaigns list ────────────────────────────────────
+    elif data == "c_campaigns":
+        if not is_creator(uid): await query.answer("❌ Not a creator!", show_alert=True); return
+        cr      = db.get_creator(uid)
+        camps   = cr.get("campaigns", [])
+        if not camps:
+            await query.edit_message_text(
+                "📭 *No Campaigns Yet*\n\nUse *New Campaign* to create your first one!",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("➕ New Campaign", callback_data="c_setup")],
+                    [InlineKeyboardButton("🔙 Back",        callback_data="c_dash")],
+                ]),
+            ); return
+        bot_me = await context.bot.get_me()
+        text   = f"🎯 *Your Campaigns* (`{len(camps)}` total)\n\n"
+        btns   = []
+        for cid in camps[-12:]:
+            c       = db.campaigns.get(cid, {})
+            mat     = db.materials.get(c.get("material_id",""), {})
+            active  = "✅" if c.get("is_active") else "❌"
+            clicks  = db.analytics.get("campaign_clicks",{}).get(cid,0)
+            unlocks = db.analytics.get("unlock_success",{}).get(cid,0)
+            text   += (f"{active} `{cid}` — *{mat.get('title','?')[:18]}*\n"
+                       f"   👆{clicks} clicks | 🔓{unlocks} unlocks\n\n")
+            btns.append([
+                InlineKeyboardButton(f"{'✅' if c.get('is_active') else '❌'} {cid[:8]}",
+                                     callback_data=f"c_togglecamp_{cid}"),
+                InlineKeyboardButton("🔗 Link", callback_data=f"c_camplink_{cid}"),
+            ])
+        btns.append([InlineKeyboardButton("➕ New Campaign", callback_data="c_setup"),
+                     InlineKeyboardButton("🔙 Back",         callback_data="c_dash")])
+        await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN,
+                                      reply_markup=InlineKeyboardMarkup(btns))
+
+    # ── Toggle campaign active/inactive ──────────────────────────
+    elif data.startswith("c_togglecamp_"):
+        if not is_creator(uid): await query.answer("❌", show_alert=True); return
+        cid  = data[len("c_togglecamp_"):]
+        camp = db.campaigns.get(cid)
+        if not camp or camp.get("creator_id") != str(uid):
+            await query.answer("❌ Not your campaign!", show_alert=True); return
+        camp["is_active"] = not camp.get("is_active", True)
+        db.save(force=True)
+        status = "✅ Activated" if camp["is_active"] else "❌ Deactivated"
+        await query.answer(f"{status} campaign {cid}", show_alert=True)
+        # Refresh campaigns view
+        cr      = db.get_creator(uid)
+        camps   = cr.get("campaigns", [])
+        bot_me  = await context.bot.get_me()
+        text    = f"🎯 *Your Campaigns* (`{len(camps)}` total)\n\n"
+        btns    = []
+        for c_id in camps[-12:]:
+            c       = db.campaigns.get(c_id, {})
+            mat     = db.materials.get(c.get("material_id",""), {})
+            active  = "✅" if c.get("is_active") else "❌"
+            clicks  = db.analytics.get("campaign_clicks",{}).get(c_id,0)
+            unlocks = db.analytics.get("unlock_success",{}).get(c_id,0)
+            text   += (f"{active} `{c_id}` — *{mat.get('title','?')[:18]}*\n"
+                       f"   👆{clicks} | 🔓{unlocks}\n\n")
+            btns.append([
+                InlineKeyboardButton(f"{'✅' if c.get('is_active') else '❌'} {c_id[:8]}",
+                                     callback_data=f"c_togglecamp_{c_id}"),
+                InlineKeyboardButton("🔗 Link", callback_data=f"c_camplink_{c_id}"),
+            ])
+        btns.append([InlineKeyboardButton("➕ New Campaign", callback_data="c_setup"),
+                     InlineKeyboardButton("🔙 Back",         callback_data="c_dash")])
+        await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN,
+                                      reply_markup=InlineKeyboardMarkup(btns))
+
+    # ── Get share link for specific campaign ──────────────────────
+    elif data.startswith("c_camplink_"):
+        if not is_creator(uid): await query.answer("❌", show_alert=True); return
+        cid    = data[len("c_camplink_"):]
+        camp   = db.campaigns.get(cid)
+        if not camp or camp.get("creator_id") != str(uid):
+            await query.answer("❌ Not your campaign!", show_alert=True); return
+        mat    = db.materials.get(camp.get("material_id",""), {})
+        bot_me = await context.bot.get_me()
+        link   = f"https://t.me/{bot_me.username}?start={cid}"
+        clicks  = db.analytics.get("campaign_clicks",{}).get(cid,0)
+        verif   = db.analytics.get("verification_success",{}).get(cid,0)
+        unlocks = db.analytics.get("unlock_success",{}).get(cid,0)
+        await query.edit_message_text(
+            f"🔗 *Campaign Details*\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🆔 ID:       `{cid}`\n"
+            f"📦 Material: *{mat.get('title','?')}*\n"
+            f"📢 Channels: {', '.join(camp.get('channels',[]))}\n"
+            f"👥 Referrals needed: `{camp.get('referral_required',0)}`\n"
+            f"Status: {'✅ Active' if camp.get('is_active') else '❌ Inactive'}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"👆 Clicks:  `{clicks}`\n"
+            f"✅ Verified:`{verif}`\n"
+            f"🔓 Unlocks: `{unlocks}`\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🔗 *Share Link:*\n`{link}`\n\n"
+            f"Tap link to copy 👆",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🌐 Open Link",   url=link)],
+                [InlineKeyboardButton("🔙 My Campaigns", callback_data="c_campaigns"),
+                 InlineKeyboardButton("🏠 Dashboard",   callback_data="c_dash")],
+            ]),
+        )
+
+    # ── All share links at once ───────────────────────────────────
+    elif data == "c_links":
+        if not is_creator(uid): await query.answer("❌ Not a creator!", show_alert=True); return
+        cr     = db.get_creator(uid)
+        camps  = cr.get("campaigns", [])
+        bot_me = await context.bot.get_me()
+        if not camps:
+            await query.edit_message_text(
+                "📭 No campaigns. Use *New Campaign* to create one.",
+                parse_mode=ParseMode.MARKDOWN, reply_markup=kb_back_creator()); return
+        text = "🔗 *Your Campaign Share Links*\n\n"
+        for cid in camps[-10:]:
+            c   = db.campaigns.get(cid, {})
+            mat = db.materials.get(c.get("material_id",""), {})
+            st  = "✅" if c.get("is_active") else "❌"
+            link = f"https://t.me/{bot_me.username}?start={cid}"
+            text += f"{st} *{mat.get('title','?')[:20]}*\n`{link}`\n\n"
+        await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN,
+                                      reply_markup=kb_back_creator())
+
+    # ── Creator help ──────────────────────────────────────────────
+    elif data == "c_help":
+        await query.edit_message_text(
+            "❓ *Creator Help Guide*\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "➕ *New Campaign* — 5-step wizard to create a force-subscribe campaign\n\n"
+            "📦 *Materials* — all your uploaded content files\n\n"
+            "🎯 *My Campaigns* — toggle on/off, get share links, view stats\n\n"
+            "📈 *Analytics* — clicks, verifications, unlocks per campaign\n\n"
+            "📢 *My Channels* — channels linked to your campaigns\n\n"
+            "📣 *Broadcast* — send a message to all users who unlocked your content\n\n"
+            "🔗 *Share Links* — all campaign links in one place\n\n"
+            "🔄 *Renew Panel* — payment info for renewing your subscription\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "*Commands:*\n"
+            "`/creator` — open creator panel\n"
+            "`/setup` — new campaign\n"
+            "`/mycampaigns` — list campaigns\n"
+            "`/mystats` — your analytics\n"
+            "`/broadcast_my_users` — broadcast",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Back", callback_data="c_dash")]
+            ]),
+        )
+
     # ══════════════════════════════════════════
-    #  ADMIN MENU CALLBACKS
+    #  ADMIN MENU CALLBACKS  (full access)
     # ══════════════════════════════════════════
+
     elif data == "a_panel":
         if not is_admin(uid): await query.answer("❌ Not admin!", show_alert=True); return
-        s = db.global_stats()
+        s     = db.global_stats()
+        badge = "👑 SUPER ADMIN" if is_super_admin(uid) else "🛡️ Admin"
         await query.edit_message_text(
-            f"🛡️ *Super Admin Panel — ForceHub*\n"
-            f"━━━━━━━━━━━━━━━━━━━\n"
-            f"👥 Users:     `{s['total_users']}`\n"
-            f"🎨 Creators:  `{s['total_creators']}`\n"
-            f"🎯 Campaigns: `{s['total_campaigns']}`\n"
-            f"📦 Materials: `{s['total_materials']}`\n"
-            f"━━━━━━━━━━━━━━━━━━━\n"
-            f"⏱ Trial: `{db.settings.get('trial_days', 90)}` days | "
-            f"💰 Price: `₹{db.settings.get('price', 199)}`\n"
-            f"💳 UPI: `{db.settings.get('upi_id', 'Not set')}`",
+            f"{badge} — *ForceHub Control Center*\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"👥 Users:     `{s['total_users']}`  |  🎨 Creators: `{s['total_creators']}`\n"
+            f"🎯 Campaigns: `{s['total_campaigns']}` |  📦 Materials: `{s['total_materials']}`\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🆕 Today Joins: `{s['today_joins']}` | 🔓 Unlocks: `{s['today_unlocks']}`\n"
+            f"⏱ Trial: `{db.settings.get('trial_days',90)}d` | "
+            f"💰 ₹`{db.settings.get('price',199)}` | "
+            f"💳 `{db.settings.get('upi_id','Not set')}`\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🕐 `{now_str()}`",
             parse_mode=ParseMode.MARKDOWN, reply_markup=kb_admin(),
         )
 
     elif data == "a_stats":
         if not is_admin(uid): return
         s = db.global_stats()
+        # Per-campaign totals
+        total_clicks  = sum(db.analytics.get("campaign_clicks",{}).values())
+        total_verif   = sum(db.analytics.get("verification_success",{}).values())
+        total_unlocks = sum(db.analytics.get("unlock_success",{}).values())
+        total_refs    = sum(db.analytics.get("referral_unlocks",{}).values())
+        # Daily history last 7 days
+        daily_text = ""
+        daily = db.analytics.get("daily", {})
+        for d in sorted(daily.keys())[-7:]:
+            dd = daily[d]
+            daily_text += f"  `{d}` — joins: `{dd.get('joins',0)}` | unlocks: `{dd.get('unlocks',0)}`\n"
         await query.edit_message_text(
-            f"📊 *Global Stats — ForceHub*\n"
-            f"━━━━━━━━━━━━━━━━━━━\n"
+            f"📊 *Full Analytics — ForceHub*\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"👥 Total Users:    `{s['total_users']}`\n"
             f"🎨 Total Creators: `{s['total_creators']}`\n"
             f"🎯 Total Campaigns:`{s['total_campaigns']}`\n"
             f"📦 Total Materials:`{s['total_materials']}`\n"
-            f"━━━━━━━━━━━━━━━━━━━\n"
-            f"🆕 Today's Joins:   `{s['today_joins']}`\n"
-            f"🔓 Today's Unlocks: `{s['today_unlocks']}`\n"
-            f"━━━━━━━━━━━━━━━━━━━\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"👆 Total Clicks:   `{total_clicks}`\n"
+            f"✅ Total Verified: `{total_verif}`\n"
+            f"🔓 Total Unlocks:  `{total_unlocks}`\n"
+            f"👥 Total Referrals:`{total_refs}`\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📅 *Last 7 Days:*\n{daily_text}"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"🕐 `{now_str()}`",
             parse_mode=ParseMode.MARKDOWN, reply_markup=kb_back_admin(),
         )
 
+    elif data == "a_settings":
+        if not is_admin(uid): return
+        await query.edit_message_text(
+            f"⚙️ *Bot Settings*\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"⏱ Trial Days: `{db.settings.get('trial_days',90)}`\n"
+            f"💰 Price:     `₹{db.settings.get('price',199)}`\n"
+            f"💳 UPI ID:    `{db.settings.get('upi_id','Not set')}`\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Commands:\n"
+            f"`/settrial <days>` | `/setprice <₹>` | `/setupi <upi>`\n"
+            f"`/addadmin <id>` | `/addcreator <id> [name]`",
+            parse_mode=ParseMode.MARKDOWN, reply_markup=kb_admin_settings(),
+        )
+
+    # ── PAGINATED USER LIST ───────────────────────────────────────
+    elif data.startswith("a_users_"):
+        if not is_admin(uid): return
+        PAGE_SIZE = 10
+        try: page = int(data.split("_")[2])
+        except: page = 0
+        all_uids  = list(db.users.keys())
+        total     = len(all_uids)
+        start     = page * PAGE_SIZE
+        chunk     = all_uids[start:start + PAGE_SIZE]
+        text      = f"👥 *All Users* — Page {page+1} / {max(1,(total-1)//PAGE_SIZE+1)} (Total: `{total}`)\n\n"
+        for u_id in chunk:
+            u_obj = db.users[u_id]
+            is_cr = "🎨" if is_creator(int(u_id)) else ("🛡️" if is_admin(int(u_id)) else "👤")
+            uname = f"@{u_obj.get('username','?')}" if u_obj.get("username") else u_obj.get("first_name","?")
+            unlocks = len(u_obj.get("unlocked_campaigns", []))
+            text += f"{is_cr} `{u_id}` — {uname} | 🔓{unlocks} | 👥{u_obj.get('referral_count',0)}\n"
+        # Navigation
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton("◀ Prev", callback_data=f"a_users_{page-1}"))
+        if start + PAGE_SIZE < total:
+            nav.append(InlineKeyboardButton("Next ▶", callback_data=f"a_users_{page+1}"))
+        buttons = []
+        if nav: buttons.append(nav)
+        buttons.append([InlineKeyboardButton("🔍 View User Details", callback_data="a_viewuser_prompt")])
+        buttons.append([InlineKeyboardButton("🔙 Back", callback_data="a_panel")])
+        await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN,
+                                      reply_markup=InlineKeyboardMarkup(buttons))
+
+    # ── PAGINATED CREATOR LIST ────────────────────────────────────
+    elif data.startswith("a_creators_"):
+        if not is_admin(uid): return
+        PAGE_SIZE = 8
+        try: page = int(data.split("_")[2])
+        except: page = 0
+        all_cids  = list(db.creators.keys())
+        total     = len(all_cids)
+        start     = page * PAGE_SIZE
+        chunk     = all_cids[start:start + PAGE_SIZE]
+        text      = f"🎨 *All Creators* — Page {page+1} / {max(1,(total-1)//PAGE_SIZE+1)} (Total: `{total}`)\n\n"
+        for c_id in chunk:
+            cr_obj  = db.creators[c_id]
+            days    = db.creator_days_left(int(c_id))
+            active  = "✅" if db.is_creator_active(int(c_id)) else "❌"
+            camps   = len(cr_obj.get("campaigns",[]))
+            total_u = sum(db.analytics.get("unlock_success",{}).get(cid,0) for cid in cr_obj.get("campaigns",[]))
+            text += (f"{active} `{c_id}` — *{cr_obj.get('name','?')[:15]}* | "
+                     f"⏳{days}d | 🎯{camps} | 🔓{total_u}\n")
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton("◀ Prev", callback_data=f"a_creators_{page-1}"))
+        if start + PAGE_SIZE < total:
+            nav.append(InlineKeyboardButton("Next ▶", callback_data=f"a_creators_{page+1}"))
+        buttons = []
+        if nav: buttons.append(nav)
+        buttons.append([InlineKeyboardButton("🔍 View Creator Details", callback_data="a_viewcreator_prompt"),
+                        InlineKeyboardButton("➕ Add Creator",           callback_data="a_addcreator_prompt")])
+        buttons.append([InlineKeyboardButton("🔙 Back", callback_data="a_panel")])
+        await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN,
+                                      reply_markup=InlineKeyboardMarkup(buttons))
+
+    # ── PAGINATED CAMPAIGN LIST ───────────────────────────────────
+    elif data.startswith("a_campaigns_"):
+        if not is_admin(uid): return
+        PAGE_SIZE = 8
+        try: page = int(data.split("_")[2])
+        except: page = 0
+        all_camps = list(db.campaigns.keys())
+        total     = len(all_camps)
+        start     = page * PAGE_SIZE
+        chunk     = all_camps[start:start + PAGE_SIZE]
+        bot_me    = await context.bot.get_me()
+        text      = f"🎯 *All Campaigns* — Page {page+1}/{max(1,(total-1)//PAGE_SIZE+1)} (Total: `{total}`)\n\n"
+        for cid in chunk:
+            c   = db.campaigns[cid]
+            mat = db.materials.get(c.get("material_id",""), {})
+            st  = "✅" if c.get("is_active") else "❌"
+            clk = db.analytics.get("campaign_clicks",{}).get(cid,0)
+            ulk = db.analytics.get("unlock_success",{}).get(cid,0)
+            text += (f"{st} `{cid}` — *{mat.get('title','?')[:16]}*\n"
+                     f"   creator:`{c.get('creator_id','?')}` | 👆{clk} | 🔓{ulk} | "
+                     f"ref:{c.get('referral_required',0)}\n")
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton("◀ Prev", callback_data=f"a_campaigns_{page-1}"))
+        if start + PAGE_SIZE < total:
+            nav.append(InlineKeyboardButton("Next ▶", callback_data=f"a_campaigns_{page+1}"))
+        buttons = []
+        if nav: buttons.append(nav)
+        buttons.append([InlineKeyboardButton("🗑 Delete Campaign", callback_data="a_delcamp_prompt")])
+        buttons.append([InlineKeyboardButton("🔙 Back", callback_data="a_panel")])
+        await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN,
+                                      reply_markup=InlineKeyboardMarkup(buttons))
+
+    # ── PAGINATED MATERIALS LIST ──────────────────────────────────
+    elif data.startswith("a_materials_"):
+        if not is_admin(uid): return
+        PAGE_SIZE = 10
+        try: page = int(data.split("_")[2])
+        except: page = 0
+        all_mids = list(db.materials.keys())
+        total    = len(all_mids)
+        start    = page * PAGE_SIZE
+        chunk    = all_mids[start:start + PAGE_SIZE]
+        text     = f"📦 *All Materials* — Page {page+1}/{max(1,(total-1)//PAGE_SIZE+1)} (Total: `{total}`)\n\n"
+        for mid in chunk:
+            m = db.materials[mid]
+            text += (f"• `{mid}` — *{m.get('title','?')[:20]}* "
+                     f"({m.get('file_type','?')})"
+                     f" by `{m.get('creator_id','?')}`\n")
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton("◀ Prev", callback_data=f"a_materials_{page-1}"))
+        if start + PAGE_SIZE < total:
+            nav.append(InlineKeyboardButton("Next ▶", callback_data=f"a_materials_{page+1}"))
+        buttons = []
+        if nav: buttons.append(nav)
+        buttons.append([InlineKeyboardButton("🔙 Back", callback_data="a_panel")])
+        await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN,
+                                      reply_markup=InlineKeyboardMarkup(buttons))
+
+    # ── PROMPT HANDLERS (inline text input flow) ──────────────────
+    elif data == "a_viewuser_prompt":
+        if not is_admin(uid): return
+        context.user_data["admin_action"] = "viewuser"
+        await query.edit_message_text(
+            "🔍 *View User Details*\n\nSend the user\'s Telegram ID:",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="a_panel")]]),
+        )
+
+    elif data == "a_viewcreator_prompt":
+        if not is_admin(uid): return
+        context.user_data["admin_action"] = "viewcreator"
+        await query.edit_message_text(
+            "🔍 *View Creator Details*\n\nSend the creator\'s Telegram ID:",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="a_panel")]]),
+        )
+
+    elif data == "a_addcreator_prompt":
+        if not is_admin(uid): return
+        context.user_data["admin_action"] = "addcreator"
+        await query.edit_message_text(
+            "➕ *Add / Renew Creator*\n\nSend: `<user_id> <name>`\n\nExample:\n`5695957392 John Doe`",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="a_panel")]]),
+        )
+
+    elif data == "a_ban_prompt":
+        if not is_admin(uid): return
+        context.user_data["admin_action"] = "bancreator"
+        await query.edit_message_text(
+            "🚫 *Ban Creator*\n\nSend the creator\'s Telegram ID to ban/expire:",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="a_panel")]]),
+        )
+
+    elif data == "a_dm_prompt":
+        if not is_admin(uid): return
+        context.user_data["admin_action"] = "dm_id"
+        await query.edit_message_text(
+            "💬 *Direct Message Any User*\n\nStep 1: Send the user\'s Telegram ID:",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="a_panel")]]),
+        )
+
+    elif data == "a_delcamp_prompt":
+        if not is_admin(uid): return
+        context.user_data["admin_action"] = "delcampaign"
+        await query.edit_message_text(
+            "🗑 *Delete Campaign*\n\nSend the Campaign ID to delete/deactivate:",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="a_panel")]]),
+        )
+
+    elif data == "a_addadmin_prompt":
+        if not is_super_admin(uid):
+            await query.answer("👑 Only Super Admin can add admins!", show_alert=True); return
+        context.user_data["admin_action"] = "addadmin"
+        await query.edit_message_text(
+            "👑 *Add Admin*\n\nSend the Telegram ID to grant admin access:",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="a_panel")]]),
+        )
+
+    # ── Confirm creator renew from view ──────────────────────────
+    elif data.startswith("a_renewcr_"):
+        if not is_admin(uid): return
+        cr_id = int(data.split("_")[2])
+        db.renew_creator(cr_id)
+        days = db.settings.get("trial_days", 90)
+        await query.answer(f"✅ Creator {cr_id} renewed for {days} days!", show_alert=True)
+        await query.edit_message_text(
+            f"✅ Creator `{cr_id}` renewed for *{days} days*.",
+            parse_mode=ParseMode.MARKDOWN, reply_markup=kb_back_admin(),
+        )
+
+    elif data.startswith("a_bancr_"):
+        if not is_admin(uid): return
+        cr_id = int(data.split("_")[2])
+        creator = db.creators.get(str(cr_id))
+        if creator:
+            creator["trial_start"] = "2000-01-01T00:00:00"
+            creator["trial_days"]  = 0
+            db.save(force=True)
+            await query.answer(f"🚫 Creator {cr_id} banned!", show_alert=True)
+            await query.edit_message_text(
+                f"🚫 Creator `{cr_id}` has been *banned*.",
+                parse_mode=ParseMode.MARKDOWN, reply_markup=kb_back_admin(),
+            )
+
+    elif data.startswith("a_delcamp_"):
+        if not is_admin(uid): return
+        camp_id = data[len("a_delcamp_"):]
+        camp = db.campaigns.get(camp_id)
+        if camp:
+            camp["is_active"] = False
+            db.save(force=True)
+            await query.answer(f"🗑 Campaign {camp_id} deactivated!", show_alert=True)
+            await query.edit_message_text(
+                f"🗑 Campaign `{camp_id}` has been *deactivated*.",
+                parse_mode=ParseMode.MARKDOWN, reply_markup=kb_back_admin(),
+            )
+
+    # ── Standard admin settings ───────────────────────────────────
     elif data == "a_broadcast":
         if not is_admin(uid): return
         await query.edit_message_text(
@@ -993,39 +1446,35 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "a_export":
         if not is_admin(uid): return
         await query.edit_message_text(
-            "📤 *Export Data*\n\nUse the /export command for a full JSON export.",
-            parse_mode=ParseMode.MARKDOWN, reply_markup=kb_back_admin(),
-        )
-
-    elif data == "a_ban":
-        if not is_admin(uid): return
-        await query.edit_message_text(
-            "🚫 *Ban Creator*\n\nCommand: `/bancreator <user_id>`",
+            "📤 Exporting data…\n\nUse /export for the full JSON file.",
             parse_mode=ParseMode.MARKDOWN, reply_markup=kb_back_admin(),
         )
 
     elif data == "a_price":
         if not is_admin(uid): return
+        context.user_data["admin_action"] = "setprice"
         await query.edit_message_text(
-            f"💰 *Set Price*\n\nCurrent: ₹{db.settings.get('price', 199)}\n\n"
-            f"Command: `/setprice <amount>`",
-            parse_mode=ParseMode.MARKDOWN, reply_markup=kb_back_admin(),
+            f"💰 *Set Price*\n\nCurrent: ₹{db.settings.get('price', 199)}\n\nSend new price (numbers only):",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="a_settings")]]),
         )
 
     elif data == "a_trial":
         if not is_admin(uid): return
+        context.user_data["admin_action"] = "settrial"
         await query.edit_message_text(
-            f"⏱ *Set Trial Days*\n\nCurrent: {db.settings.get('trial_days', 90)} days\n\n"
-            f"Command: `/settrial <days>`",
-            parse_mode=ParseMode.MARKDOWN, reply_markup=kb_back_admin(),
+            f"⏱ *Set Trial Days*\n\nCurrent: {db.settings.get('trial_days', 90)} days\n\nSend new trial days:",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="a_settings")]]),
         )
 
     elif data == "a_upi":
         if not is_admin(uid): return
+        context.user_data["admin_action"] = "setupi"
         await query.edit_message_text(
-            f"💳 *Set UPI ID*\n\nCurrent: `{db.settings.get('upi_id', 'Not set')}`\n\n"
-            f"Command: `/setupi <upi_id>`",
-            parse_mode=ParseMode.MARKDOWN, reply_markup=kb_back_admin(),
+            f"💳 *Set UPI ID*\n\nCurrent: `{db.settings.get('upi_id', 'Not set')}`\n\nSend new UPI ID:",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="a_settings")]]),
         )
 
 
@@ -1096,6 +1545,251 @@ async def _execute_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE,
 async def general_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     msg = update.message
+
+    # ══════════════════════════════════════════════════════════════
+    #  ADMIN INLINE ACTION HANDLER  (processes text inputs for admin prompts)
+    # ══════════════════════════════════════════════════════════════
+    if is_admin(uid) and context.user_data.get("admin_action"):
+        action = context.user_data.pop("admin_action")
+        text   = (msg.text or "").strip()
+
+        # ── View User ───────────────────────────────────────────────
+        if action == "viewuser":
+            try:
+                target_id = int(text)
+                u_obj = db.get_user(target_id)
+                if not u_obj:
+                    await msg.reply_text(f"❌ User `{target_id}` not found.", parse_mode=ParseMode.MARKDOWN)
+                    return
+                is_cr_flag  = "🎨 Yes" if is_creator(target_id) else "No"
+                is_adm_flag = "🛡️ Yes" if is_admin(target_id) else "No"
+                unlocked    = u_obj.get("unlocked_campaigns", [])
+                ref_by      = u_obj.get("referred_by", "None")
+                uname       = f"@{u_obj['username']}" if u_obj.get("username") else "—"
+                await msg.reply_text(
+                    f"👤 *User Profile*\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"🆔 ID:        `{target_id}`\n"
+                    f"📛 Name:      *{u_obj.get('first_name','?')}*\n"
+                    f"🔗 Username:  {uname}\n"
+                    f"📅 Joined:    `{u_obj.get('joined_at','?')}` \n"
+                    f"🎨 Creator:   {is_cr_flag}\n"
+                    f"🛡️ Admin:     {is_adm_flag}\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"🔓 Unlocked:  `{len(unlocked)}` campaigns\n"
+                    f"👥 Referrals: `{u_obj.get('referral_count',0)}`\n"
+                    f"👈 Referred by: `{ref_by}`\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    + ("\n".join(f"  • `{cid}`" for cid in unlocked[-5:]) if unlocked else "  No unlocks yet."),
+                    parse_mode=ParseMode.MARKDOWN,
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("💬 DM This User",    callback_data=f"a_panel"),
+                         InlineKeyboardButton("👁 View Users List", callback_data="a_users_0")],
+                        [InlineKeyboardButton("🔙 Admin Panel",     callback_data="a_panel")],
+                    ]),
+                )
+            except (ValueError, Exception) as e:
+                await msg.reply_text(f"❌ Error: {e}", parse_mode=ParseMode.MARKDOWN)
+
+        # ── View Creator ────────────────────────────────────────────
+        elif action == "viewcreator":
+            try:
+                target_id = int(text)
+                cr_obj = db.get_creator(target_id)
+                if not cr_obj:
+                    await msg.reply_text(f"❌ Creator `{target_id}` not found.", parse_mode=ParseMode.MARKDOWN)
+                    return
+                days    = db.creator_days_left(target_id)
+                active  = "✅ Active" if db.is_creator_active(target_id) else "❌ Expired"
+                camps   = cr_obj.get("campaigns", [])
+                mats    = cr_obj.get("materials", [])
+                chans   = cr_obj.get("channels", [])
+                total_unlocks = sum(db.analytics.get("unlock_success",{}).get(cid,0) for cid in camps)
+                total_clicks  = sum(db.analytics.get("campaign_clicks",{}).get(cid,0) for cid in camps)
+                await msg.reply_text(
+                    f"🎨 *Creator Profile*\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"🆔 ID:        `{target_id}`\n"
+                    f"📛 Name:      *{cr_obj.get('name','?')}*\n"
+                    f"🔗 Username:  @{cr_obj.get('username','—')}\n"
+                    f"📅 Joined:    `{cr_obj.get('joined_at','?')}` \n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"Status:       {active}\n"
+                    f"⏳ Days Left: `{days}`\n"
+                    f"Trial Start:  `{cr_obj.get('trial_start','?')}` \n"
+                    f"Trial Days:   `{cr_obj.get('trial_days',90)}`\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"🎯 Campaigns: `{len(camps)}` | 📦 Materials: `{len(mats)}`\n"
+                    f"📢 Channels:  {len(chans)}\n"
+                    f"👆 Clicks:    `{total_clicks}` | 🔓 Unlocks: `{total_unlocks}`\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"Channels: {', '.join(chans) or 'None'}",
+                    parse_mode=ParseMode.MARKDOWN,
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔄 Renew Creator", callback_data=f"a_renewcr_{target_id}"),
+                         InlineKeyboardButton("🚫 Ban Creator",  callback_data=f"a_bancr_{target_id}")],
+                        [InlineKeyboardButton("🔙 Admin Panel",  callback_data="a_panel")],
+                    ]),
+                )
+            except (ValueError, Exception) as e:
+                await msg.reply_text(f"❌ Error: {e}", parse_mode=ParseMode.MARKDOWN)
+
+        # ── Add / Renew Creator ──────────────────────────────────────
+        elif action == "addcreator":
+            parts = text.split(None, 1)
+            if not parts:
+                await msg.reply_text("❌ Format: `<user_id> [Name]`", parse_mode=ParseMode.MARKDOWN)
+                return
+            try:
+                cr_id  = int(parts[0])
+                name   = parts[1] if len(parts) > 1 else f"Creator_{cr_id}"
+                days   = db.settings.get("trial_days", 90)
+                if db.get_creator(cr_id):
+                    db.renew_creator(cr_id)
+                    await msg.reply_text(
+                        f"✅ Creator `{cr_id}` renewed for *{days} days*.",
+                        parse_mode=ParseMode.MARKDOWN, reply_markup=kb_back_admin(),
+                    )
+                else:
+                    db.create_creator(cr_id, "", name)
+                    await msg.reply_text(
+                        f"✅ Creator *{name}* (`{cr_id}`) added — *{days}-day trial*.",
+                        parse_mode=ParseMode.MARKDOWN, reply_markup=kb_back_admin(),
+                    )
+            except ValueError:
+                await msg.reply_text("❌ Invalid user ID.", parse_mode=ParseMode.MARKDOWN)
+
+        # ── Ban Creator ──────────────────────────────────────────────
+        elif action == "bancreator":
+            try:
+                cr_id   = str(int(text))
+                creator = db.creators.get(cr_id)
+                if not creator:
+                    await msg.reply_text("❌ Creator not found."); return
+                creator["trial_start"] = "2000-01-01T00:00:00"
+                creator["trial_days"]  = 0
+                db.save(force=True)
+                await msg.reply_text(
+                    f"🚫 Creator `{cr_id}` has been *banned/expired*.",
+                    parse_mode=ParseMode.MARKDOWN, reply_markup=kb_back_admin(),
+                )
+            except ValueError:
+                await msg.reply_text("❌ Invalid ID.")
+
+        # ── DM — collect target ID ───────────────────────────────────
+        elif action == "dm_id":
+            try:
+                dm_target = int(text)
+                context.user_data["admin_action"] = "dm_msg"
+                context.user_data["dm_target_id"] = dm_target
+                u_obj = db.get_user(dm_target)
+                uname = f"@{u_obj['username']}" if (u_obj and u_obj.get("username")) else str(dm_target)
+                await msg.reply_text(
+                    f"💬 *DM to {uname}*\n\nNow send the message to deliver:",
+                    parse_mode=ParseMode.MARKDOWN,
+                    reply_markup=InlineKeyboardMarkup(
+                        [[InlineKeyboardButton("❌ Cancel", callback_data="a_panel")]]
+                    ),
+                )
+            except ValueError:
+                await msg.reply_text("❌ Invalid user ID.")
+
+        # ── DM — send message ────────────────────────────────────────
+        elif action == "dm_msg":
+            dm_target = context.user_data.pop("dm_target_id", None)
+            if not dm_target:
+                await msg.reply_text("❌ No target. Start over."); return
+            try:
+                caption = msg.caption or ""
+                if msg.text:
+                    await context.bot.send_message(
+                        dm_target, f"📩 *Message from Admin:*\n\n{msg.text}",
+                        parse_mode=ParseMode.MARKDOWN,
+                    )
+                elif msg.photo:
+                    await context.bot.send_photo(
+                        dm_target, msg.photo[-1].file_id,
+                        caption=f"📩 *From Admin:* {caption}", parse_mode=ParseMode.MARKDOWN,
+                    )
+                elif msg.video:
+                    await context.bot.send_video(
+                        dm_target, msg.video.file_id,
+                        caption=f"📩 *From Admin:* {caption}", parse_mode=ParseMode.MARKDOWN,
+                    )
+                elif msg.document:
+                    await context.bot.send_document(
+                        dm_target, msg.document.file_id,
+                        caption=f"📩 *From Admin:* {caption}", parse_mode=ParseMode.MARKDOWN,
+                    )
+                await msg.reply_text(
+                    f"✅ Message delivered to `{dm_target}`!",
+                    parse_mode=ParseMode.MARKDOWN, reply_markup=kb_back_admin(),
+                )
+            except Forbidden:
+                await msg.reply_text(f"❌ User `{dm_target}` blocked the bot.")
+            except Exception as e:
+                await msg.reply_text(f"❌ Delivery failed: {e}")
+
+        # ── Delete Campaign ──────────────────────────────────────────
+        elif action == "delcampaign":
+            camp_id = text.upper()
+            camp    = db.campaigns.get(camp_id)
+            if not camp:
+                await msg.reply_text(f"❌ Campaign `{camp_id}` not found.", parse_mode=ParseMode.MARKDOWN)
+                return
+            await msg.reply_text(
+                f"🗑 *Confirm Delete Campaign `{camp_id}`?*\n\n"
+                f"This will deactivate it — users won\'t be able to access it.",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("✅ Yes, Deactivate", callback_data=f"a_delcamp_{camp_id}"),
+                     InlineKeyboardButton("❌ Cancel",          callback_data="a_panel")],
+                ]),
+            )
+
+        # ── Add Admin ────────────────────────────────────────────────
+        elif action == "addadmin":
+            if not is_super_admin(uid):
+                await msg.reply_text("👑 Only Super Admin can add admins!"); return
+            try:
+                new_admin_id = int(text)
+                admins = db.settings.setdefault("admin_ids", [])
+                if new_admin_id not in admins:
+                    admins.append(new_admin_id)
+                    db.save(force=True)
+                    await msg.reply_text(
+                        f"✅ User `{new_admin_id}` added as *Admin*.",
+                        parse_mode=ParseMode.MARKDOWN, reply_markup=kb_back_admin(),
+                    )
+                else:
+                    await msg.reply_text(f"ℹ️ Already an admin.")
+            except ValueError:
+                await msg.reply_text("❌ Invalid user ID.")
+
+        # ── Inline settings changes ──────────────────────────────────
+        elif action == "setprice":
+            try:
+                price = int(text)
+                db.set_price(price)
+                await msg.reply_text(f"✅ Price set to *₹{price}*",
+                                     parse_mode=ParseMode.MARKDOWN, reply_markup=kb_back_admin())
+            except ValueError:
+                await msg.reply_text("❌ Invalid amount.")
+
+        elif action == "settrial":
+            try:
+                days = int(text)
+                db.set_trial_days(days)
+                await msg.reply_text(f"✅ Trial set to *{days} days*",
+                                     parse_mode=ParseMode.MARKDOWN, reply_markup=kb_back_admin())
+            except ValueError:
+                await msg.reply_text("❌ Invalid number.")
+
+        elif action == "setupi":
+            db.set_upi(text)
+            await msg.reply_text(f"✅ UPI updated: `{text}`",
+                                 parse_mode=ParseMode.MARKDOWN, reply_markup=kb_back_admin())
+        return  # ← Don't fall through to broadcast handlers
 
     # ── Admin broadcast: collect content ──────────────────────────
     if is_admin(uid) and context.user_data.get("bcast_step") == "content":
@@ -1673,32 +2367,523 @@ async def cmd_broadcast_my_users(update: Update, context: ContextTypes.DEFAULT_T
 
 
 # ─────────────────────────────────────────────────────────────────
+# NEW COMMANDS — smooth shortcuts
+# ─────────────────────────────────────────────────────────────────
+
+async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/admin — dedicated admin panel shortcut"""
+    uid  = update.effective_user.id
+    user = update.effective_user
+    if not is_admin(uid):
+        await update.message.reply_text("❌ You don't have admin access.")
+        return
+    s     = db.global_stats()
+    badge = "👑 SUPER ADMIN" if is_super_admin(uid) else "🛡️ Admin"
+    await update.message.reply_text(
+        f"{badge} — *ForceHub Control Center*\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"👋 *{user.first_name}* | 🆔 `{uid}`\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"👥 Users:     `{s['total_users']}`  |  🎨 Creators: `{s['total_creators']}`\n"
+        f"🎯 Campaigns: `{s['total_campaigns']}` |  📦 Materials: `{s['total_materials']}`\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🆕 Today Joins: `{s['today_joins']}` | 🔓 Unlocks: `{s['today_unlocks']}`\n"
+        f"⏱ Trial: `{db.settings.get('trial_days',90)}d` | "
+        f"💰 ₹`{db.settings.get('price',199)}` | "
+        f"💳 `{db.settings.get('upi_id','Not set')}`\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🕐 `{now_str()}`",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb_admin(),
+    )
+
+
+async def cmd_creator(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/creator — dedicated creator panel shortcut"""
+    uid  = update.effective_user.id
+    user = update.effective_user
+    if not is_creator(uid):
+        await update.message.reply_text(
+            "❌ You are not a registered creator.\n\n"
+            "Contact admin to get creator access.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+    cr     = db.get_creator(uid)
+    days   = db.creator_days_left(uid)
+    status = "✅ Active" if db.is_creator_active(uid) else "❌ Expired"
+    camps  = cr.get("campaigns", [])
+    total_unlocks = sum(db.analytics.get("unlock_success",{}).get(cid,0) for cid in camps)
+    total_clicks  = sum(db.analytics.get("campaign_clicks",{}).get(cid,0) for cid in camps)
+    await update.message.reply_text(
+        f"🎨 *Creator Panel — ForceHub*\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 *{cr.get('name', user.first_name)}*  |  `{uid}`\n"
+        f"Status: {status}  |  ⏳ `{days}` days left\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🎯 Campaigns: `{len(camps)}`  |  📦 Materials: `{len(cr.get('materials',[]))}`\n"
+        f"📢 Channels:  `{len(cr.get('channels',[]))}`\n"
+        f"👆 Total Clicks: `{total_clicks}`  |  🔓 Unlocks: `{total_unlocks}`\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🕐 `{now_str()}`",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb_creator(),
+    )
+
+
+async def cmd_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/id — returns the user's Telegram ID (useful for admin setup)"""
+    user = update.effective_user
+    role = "👑 Super Admin" if is_super_admin(user.id) else (
+           "🛡️ Admin" if is_admin(user.id) else (
+           "🎨 Creator" if is_creator(user.id) else "👤 User"))
+    await update.message.reply_text(
+        f"🆔 *Your Telegram ID*\n\n"
+        f"`{user.id}`\n\n"
+        f"👤 Name: *{user.first_name}*\n"
+        f"🔗 Username: @{user.username or 'None'}\n"
+        f"🏷 Role: {role}",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/help — context-aware help"""
+    uid  = update.effective_user.id
+    user = update.effective_user
+
+    if is_admin(uid):
+        text = (
+            "🛡️ *Admin Help — ForceHub*\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "*Panel Commands:*\n"
+            "`/admin` — open admin control center\n"
+            "`/broadcast` — broadcast to users/creators/everyone\n"
+            "`/globalstats` — full analytics\n"
+            "`/export` — export all data as JSON\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "*Creator Management:*\n"
+            "`/addcreator <id> [name]` — add or renew creator\n"
+            "`/bancreator <id>` — ban/expire creator\n"
+            "`/viewuser <id>` — view user profile\n"
+            "`/viewcreator <id>` — view creator profile\n"
+            "`/dm <id> <msg>` — direct message any user\n"
+            "`/renewcreator <id>` — renew creator subscription\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "*Settings:*\n"
+            "`/settrial <days>` — set trial period\n"
+            "`/setprice <₹>` — set renewal price\n"
+            "`/setupi <upi>` — set UPI ID\n"
+            "`/addadmin <id>` — add new admin\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "*Campaigns:*\n"
+            "`/delcampaign <id>` — deactivate campaign\n"
+            "`/togglecampaign <id>` — toggle campaign on/off\n"
+            "`/id` — get your Telegram ID"
+        )
+    elif is_creator(uid):
+        text = (
+            "🎨 *Creator Help — ForceHub*\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "`/creator` — open creator panel\n"
+            "`/setup` — create new campaign (wizard)\n"
+            "`/mycampaigns` — list all your campaigns\n"
+            "`/mystats` — your analytics\n"
+            "`/materials` — manage your materials\n"
+            "`/channels` — manage your channels\n"
+            "`/broadcast_my_users` — broadcast to your audience\n"
+            "`/renewpanel` — renew subscription info\n"
+            "`/togglecampaign <id>` — activate/deactivate campaign\n"
+            "`/id` — get your Telegram ID"
+        )
+    else:
+        text = (
+            "🚀 *ForceHub Help*\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "ForceHub is a content unlock platform.\n\n"
+            "📢 Get a campaign link from a creator\n"
+            "✅ Join the required channel(s)\n"
+            "🔓 Unlock exclusive content!\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "`/start` — main menu\n"
+            "`/id` — your Telegram ID\n"
+            "`/help` — this message"
+        )
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+
+
+async def cmd_mystats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/mystats — creator personal analytics"""
+    uid = update.effective_user.id
+    if not is_creator(uid):
+        await update.message.reply_text("❌ Not a creator."); return
+    cr    = db.get_creator(uid)
+    camps = cr.get("campaigns", [])
+    text  = "📈 *Your Analytics — ForceHub*\n\n"
+    total_clicks = total_verif = total_unlocks = 0
+    for cid in camps:
+        c   = db.campaigns.get(cid, {})
+        mat = db.materials.get(c.get("material_id",""), {})
+        clk = db.analytics.get("campaign_clicks",{}).get(cid,0)
+        ver = db.analytics.get("verification_success",{}).get(cid,0)
+        ulk = db.analytics.get("unlock_success",{}).get(cid,0)
+        total_clicks  += clk
+        total_verif   += ver
+        total_unlocks += ulk
+        st = "✅" if c.get("is_active") else "❌"
+        text += (f"{st} *{mat.get('title','?')[:20]}* — `{cid}`\n"
+                 f"   👆 {clk}  ✅ {ver}  🔓 {ulk}\n\n")
+    text += (f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+             f"*Totals:* 👆`{total_clicks}` ✅`{total_verif}` 🔓`{total_unlocks}`\n"
+             f"📢 Channels: `{len(cr.get('channels',[]))}` | "
+             f"📦 Materials: `{len(cr.get('materials',[]))}`")
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN,
+                                    reply_markup=kb_back_creator())
+
+
+async def cmd_viewuser(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/viewuser <id> — admin: view detailed user profile"""
+    uid = update.effective_user.id
+    if not is_admin(uid): return
+    if not context.args:
+        await update.message.reply_text("Usage: `/viewuser <user_id>`",
+                                        parse_mode=ParseMode.MARKDOWN); return
+    try:
+        target_id = int(context.args[0])
+        u_obj = db.get_user(target_id)
+        if not u_obj:
+            await update.message.reply_text(f"❌ User `{target_id}` not found.",
+                                            parse_mode=ParseMode.MARKDOWN); return
+        is_cr_flag  = "🎨 Yes" if is_creator(target_id) else "No"
+        is_adm_flag = "🛡️ Yes" if is_admin(target_id) else "No"
+        unlocked    = u_obj.get("unlocked_campaigns", [])
+        uname       = f"@{u_obj['username']}" if u_obj.get("username") else "—"
+        await update.message.reply_text(
+            f"👤 *User Profile*\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🆔 ID:        `{target_id}`\n"
+            f"📛 Name:      *{u_obj.get('first_name','?')}*\n"
+            f"🔗 Username:  {uname}\n"
+            f"📅 Joined:    `{u_obj.get('joined_at','?')}`\n"
+            f"🎨 Creator:   {is_cr_flag}  |  🛡️ Admin: {is_adm_flag}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🔓 Unlocked:  `{len(unlocked)}` campaigns\n"
+            f"👥 Referrals: `{u_obj.get('referral_count',0)}`\n"
+            f"👈 Referred by: `{u_obj.get('referred_by','None')}`\n"
+            + ("\n*Unlocked campaigns:*\n" + "\n".join(f"  • `{c}`" for c in unlocked[-5:])
+               if unlocked else ""),
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Admin Panel", callback_data="a_panel")]
+            ]),
+        )
+    except ValueError:
+        await update.message.reply_text("❌ Invalid user ID.")
+
+
+async def cmd_viewcreator(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/viewcreator <id> — admin: view detailed creator profile"""
+    uid = update.effective_user.id
+    if not is_admin(uid): return
+    if not context.args:
+        await update.message.reply_text("Usage: `/viewcreator <creator_id>`",
+                                        parse_mode=ParseMode.MARKDOWN); return
+    try:
+        target_id = int(context.args[0])
+        cr_obj = db.get_creator(target_id)
+        if not cr_obj:
+            await update.message.reply_text(f"❌ Creator `{target_id}` not found.",
+                                            parse_mode=ParseMode.MARKDOWN); return
+        days   = db.creator_days_left(target_id)
+        active = "✅ Active" if db.is_creator_active(target_id) else "❌ Expired"
+        camps  = cr_obj.get("campaigns", [])
+        total_unlocks = sum(db.analytics.get("unlock_success",{}).get(cid,0) for cid in camps)
+        total_clicks  = sum(db.analytics.get("campaign_clicks",{}).get(cid,0) for cid in camps)
+        await update.message.reply_text(
+            f"🎨 *Creator Profile*\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🆔 ID: `{target_id}` | 📛 *{cr_obj.get('name','?')}*\n"
+            f"Status: {active} | ⏳ `{days}` days left\n"
+            f"📅 Joined: `{cr_obj.get('joined_at','?')}`\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🎯 Campaigns: `{len(camps)}` | 📦 Materials: `{len(cr_obj.get('materials',[]))}`\n"
+            f"👆 Clicks: `{total_clicks}` | 🔓 Unlocks: `{total_unlocks}`\n"
+            f"📢 Channels: {', '.join(cr_obj.get('channels',[])) or 'None'}",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔄 Renew", callback_data=f"a_renewcr_{target_id}"),
+                 InlineKeyboardButton("🚫 Ban",   callback_data=f"a_bancr_{target_id}")],
+                [InlineKeyboardButton("🔙 Admin Panel", callback_data="a_panel")],
+            ]),
+        )
+    except ValueError:
+        await update.message.reply_text("❌ Invalid creator ID.")
+
+
+async def cmd_dm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/dm <user_id> <message> — admin: DM any user directly"""
+    uid = update.effective_user.id
+    if not is_admin(uid): return
+    if not context.args or len(context.args) < 2:
+        await update.message.reply_text(
+            "Usage: `/dm <user_id> <message>`\n\nExample:\n`/dm 123456789 Hello!`",
+            parse_mode=ParseMode.MARKDOWN); return
+    try:
+        target_id = int(context.args[0])
+        message   = " ".join(context.args[1:])
+        await context.bot.send_message(
+            target_id,
+            f"📩 *Message from Admin:*\n\n{message}",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        await update.message.reply_text(
+            f"✅ Message delivered to `{target_id}`.", parse_mode=ParseMode.MARKDOWN
+        )
+    except Forbidden:
+        await update.message.reply_text(f"❌ User blocked the bot.")
+    except ValueError:
+        await update.message.reply_text("❌ Invalid user ID.")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {e}")
+
+
+async def cmd_delcampaign(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/delcampaign <id> — admin: deactivate a campaign"""
+    uid = update.effective_user.id
+    if not is_admin(uid): return
+    if not context.args:
+        await update.message.reply_text("Usage: `/delcampaign <campaign_id>`",
+                                        parse_mode=ParseMode.MARKDOWN); return
+    camp_id = context.args[0].upper()
+    camp    = db.campaigns.get(camp_id)
+    if not camp:
+        await update.message.reply_text(f"❌ Campaign `{camp_id}` not found.",
+                                        parse_mode=ParseMode.MARKDOWN); return
+    camp["is_active"] = False
+    db.save(force=True)
+    await update.message.reply_text(
+        f"🗑 Campaign `{camp_id}` has been *deactivated*.",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+
+async def cmd_togglecampaign(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/togglecampaign <id> — admin or creator: toggle campaign active/inactive"""
+    uid  = update.effective_user.id
+    if not (is_admin(uid) or is_creator(uid)):
+        await update.message.reply_text("❌ No access."); return
+    if not context.args:
+        await update.message.reply_text("Usage: `/togglecampaign <campaign_id>`",
+                                        parse_mode=ParseMode.MARKDOWN); return
+    camp_id = context.args[0].upper()
+    camp    = db.campaigns.get(camp_id)
+    if not camp:
+        await update.message.reply_text(f"❌ Campaign `{camp_id}` not found.",
+                                        parse_mode=ParseMode.MARKDOWN); return
+    # Creators can only toggle their own campaigns
+    if not is_admin(uid) and camp.get("creator_id") != str(uid):
+        await update.message.reply_text("❌ Not your campaign!"); return
+    camp["is_active"] = not camp.get("is_active", True)
+    db.save(force=True)
+    status = "✅ Activated" if camp["is_active"] else "❌ Deactivated"
+    await update.message.reply_text(
+        f"{status} campaign `{camp_id}`.", parse_mode=ParseMode.MARKDOWN
+    )
+
+
+async def cmd_renewcreator(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/renewcreator <id> [days] — admin: renew creator subscription"""
+    uid = update.effective_user.id
+    if not is_admin(uid): return
+    if not context.args:
+        await update.message.reply_text("Usage: `/renewcreator <id> [days]`",
+                                        parse_mode=ParseMode.MARKDOWN); return
+    try:
+        cr_id = int(context.args[0])
+        days  = int(context.args[1]) if len(context.args) > 1 else None
+        cr    = db.get_creator(cr_id)
+        if not cr:
+            await update.message.reply_text(f"❌ Creator `{cr_id}` not found.",
+                                            parse_mode=ParseMode.MARKDOWN); return
+        db.renew_creator(cr_id, days)
+        final_days = days or db.settings.get("trial_days", 90)
+        await update.message.reply_text(
+            f"✅ Creator `{cr_id}` (*{cr.get('name','?')}*) renewed for *{final_days} days*.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+    except ValueError:
+        await update.message.reply_text("❌ Invalid ID or days.")
+
+
+async def cmd_addadmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/addadmin <id> — super admin only: grant admin access"""
+    uid = update.effective_user.id
+    if not is_super_admin(uid):
+        await update.message.reply_text("👑 Only Super Admin can use this."); return
+    if not context.args:
+        await update.message.reply_text("Usage: `/addadmin <user_id>`",
+                                        parse_mode=ParseMode.MARKDOWN); return
+    try:
+        new_id = int(context.args[0])
+        admins = db.settings.setdefault("admin_ids", [])
+        if new_id not in admins:
+            admins.append(new_id)
+            db.save(force=True)
+            await update.message.reply_text(
+                f"✅ User `{new_id}` is now an *Admin*.", parse_mode=ParseMode.MARKDOWN
+            )
+        else:
+            await update.message.reply_text(f"ℹ️ Already an admin.")
+    except ValueError:
+        await update.message.reply_text("❌ Invalid user ID.")
+
+
+async def cmd_listcreators(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/listcreators — admin: quick text list of all creators"""
+    uid = update.effective_user.id
+    if not is_admin(uid): return
+    cids = list(db.creators.keys())
+    if not cids:
+        await update.message.reply_text("📭 No creators registered yet."); return
+    text = f"🎨 *All Creators* (`{len(cids)}` total)\n\n"
+    for cid in cids:
+        cr     = db.creators[cid]
+        days   = db.creator_days_left(int(cid))
+        active = "✅" if db.is_creator_active(int(cid)) else "❌"
+        text  += f"{active} `{cid}` — *{cr.get('name','?')}* | ⏳{days}d\n"
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN,
+                                    reply_markup=kb_back_admin())
+
+
+async def cmd_listusers(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/listusers [page] — admin: paginated user list"""
+    uid = update.effective_user.id
+    if not is_admin(uid): return
+    try: page = int(context.args[0]) - 1 if context.args else 0
+    except: page = 0
+    PAGE_SIZE = 15
+    all_uids  = list(db.users.keys())
+    total     = len(all_uids)
+    start     = page * PAGE_SIZE
+    chunk     = all_uids[start:start + PAGE_SIZE]
+    text      = (f"👥 *Users* — Page {page+1}/{max(1,(total-1)//PAGE_SIZE+1)} "
+                 f"(Total: `{total}`)\n\n")
+    for u_id in chunk:
+        u_obj = db.users[u_id]
+        role  = "🎨" if is_creator(int(u_id)) else ("🛡️" if is_admin(int(u_id)) else "👤")
+        uname = f"@{u_obj.get('username','')}" if u_obj.get("username") else u_obj.get("first_name","?")
+        text += f"{role} `{u_id}` — {uname} | 🔓{len(u_obj.get('unlocked_campaigns',[]))}\n"
+    if start + PAGE_SIZE < total:
+        text += f"\nUse `/listusers {page+2}` for next page"
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    """Global error handler — logs errors silently, notifies super admin."""
+    logger.error("Update caused error: %s", context.error, exc_info=context.error)
+    # Notify super admin
+    for sa_id in SUPER_ADMIN_IDS:
+        try:
+            await context.bot.send_message(
+                sa_id,
+                f"⚠️ *Bot Error*\n`{type(context.error).__name__}: {context.error}`",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+        except Exception:
+            pass
+
+
+async def cmd_unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle unknown commands gracefully."""
+    uid = update.effective_user.id
+    if is_admin(uid):
+        await update.message.reply_text(
+            "❓ Unknown command. Use /help for admin commands.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛡️ Admin Panel", callback_data="a_panel")]]),
+        )
+    elif is_creator(uid):
+        await update.message.reply_text(
+            "❓ Unknown command. Use /help for creator commands.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🎨 Creator Panel", callback_data="c_dash")]]),
+        )
+    else:
+        await update.message.reply_text(
+            "❓ Unknown command. Use /start to begin.",
+            reply_markup=kb_user(),
+        )
+
+
+# ─────────────────────────────────────────────────────────────────
 # BOT STARTUP
 # ─────────────────────────────────────────────────────────────────
 
 async def post_init(app: Application):
     """Register commands and start background tasks."""
-    commands = [
-        # User
-        BotCommand("start",              "Main menu"),
-        # Creator
-        BotCommand("setup",              "Create a new campaign"),
-        BotCommand("mycampaigns",        "View your campaigns"),
-        BotCommand("materials",          "Manage materials"),
-        BotCommand("channels",           "Manage channels"),
-        BotCommand("broadcast_my_users", "Broadcast to your users"),
-        BotCommand("renewpanel",         "Renew creator subscription"),
-        # Admin
-        BotCommand("globalstats",        "Global analytics"),
-        BotCommand("broadcast",          "Super admin broadcast"),
-        BotCommand("addcreator",         "Add / renew a creator"),
-        BotCommand("bancreator",         "Ban a creator"),
-        BotCommand("settrial",           "Set global trial days"),
-        BotCommand("setprice",           "Set renewal price"),
-        BotCommand("setupi",             "Set UPI ID"),
-        BotCommand("export",             "Export data JSON"),
+    # ── All users ──────────────────────────────────────────────────
+    user_commands = [
+        BotCommand("start",  "🚀 Main menu"),
+        BotCommand("id",     "🆔 Your Telegram ID"),
+        BotCommand("help",   "❓ Help & commands"),
     ]
-    await app.bot.set_my_commands(commands)
+    # ── Creator only ───────────────────────────────────────────────
+    creator_commands = user_commands + [
+        BotCommand("creator",            "🎨 Creator panel"),
+        BotCommand("setup",              "➕ Create new campaign"),
+        BotCommand("mycampaigns",        "🎯 Your campaigns"),
+        BotCommand("mystats",            "📈 Your analytics"),
+        BotCommand("materials",          "📦 Manage materials"),
+        BotCommand("channels",           "📢 Manage channels"),
+        BotCommand("broadcast_my_users", "📣 Broadcast to your users"),
+        BotCommand("togglecampaign",     "🔁 Toggle campaign on/off"),
+        BotCommand("renewpanel",         "🔄 Renew subscription"),
+    ]
+    # ── Admin ──────────────────────────────────────────────────────
+    admin_commands = creator_commands + [
+        BotCommand("admin",           "🛡️ Admin control center"),
+        BotCommand("broadcast",       "📣 Broadcast to all"),
+        BotCommand("globalstats",     "📊 Global analytics"),
+        BotCommand("addcreator",      "➕ Add/renew creator"),
+        BotCommand("bancreator",      "🚫 Ban creator"),
+        BotCommand("renewcreator",    "🔄 Renew creator"),
+        BotCommand("viewuser",        "👤 View user details"),
+        BotCommand("viewcreator",     "🎨 View creator details"),
+        BotCommand("listcreators",    "📋 List all creators"),
+        BotCommand("listusers",       "📋 List all users"),
+        BotCommand("dm",              "💬 DM any user"),
+        BotCommand("delcampaign",     "🗑 Delete campaign"),
+        BotCommand("togglecampaign",  "🔁 Toggle campaign"),
+        BotCommand("settrial",        "⏱ Set trial days"),
+        BotCommand("setprice",        "💰 Set price"),
+        BotCommand("setupi",          "💳 Set UPI ID"),
+        BotCommand("addadmin",        "👑 Add admin"),
+        BotCommand("export",          "📤 Export JSON"),
+    ]
+    # Set scoped commands — Telegram shows relevant commands per user
+    try:
+        from telegram import BotCommandScopeAllPrivateChats, BotCommandScopeChat
+        await app.bot.set_my_commands(user_commands)
+        # Set admin-specific commands for each super admin
+        for sa_id in SUPER_ADMIN_IDS:
+            try:
+                await app.bot.set_my_commands(
+                    admin_commands,
+                    scope=BotCommandScopeChat(chat_id=sa_id)
+                )
+            except Exception:
+                pass
+        # Set for env admins too
+        for a_id in ADMIN_IDS:
+            try:
+                await app.bot.set_my_commands(
+                    admin_commands,
+                    scope=BotCommandScopeChat(chat_id=a_id)
+                )
+            except Exception:
+                pass
+    except Exception:
+        # Fallback: set global commands
+        await app.bot.set_my_commands(admin_commands)
+
     asyncio.create_task(db.periodic_save())
     logger.info("🚀 ForceHub Bot started — %s", now_str())
 
@@ -1749,30 +2934,44 @@ def main():
     )
 
     # ── Register handlers (order matters) ─────────────────────────
-    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("start",   cmd_start))
     app.add_handler(setup_conv)
 
-    # Admin commands
-    app.add_handler(CommandHandler("settrial",   cmd_settrial))
-    app.add_handler(CommandHandler("setprice",   cmd_setprice))
-    app.add_handler(CommandHandler("setupi",     cmd_setupi))
-    app.add_handler(CommandHandler("globalstats",cmd_globalstats))
-    app.add_handler(CommandHandler("addcreator", cmd_addcreator))
-    app.add_handler(CommandHandler("bancreator", cmd_bancreator))
-    app.add_handler(CommandHandler("broadcast",  cmd_broadcast))
-    app.add_handler(CommandHandler("export",     cmd_export))
+    # ── Universal commands ─────────────────────────────────────────
+    app.add_handler(CommandHandler("id",     cmd_id))
+    app.add_handler(CommandHandler("help",   cmd_help))
 
-    # Creator commands
+    # ── Admin commands ─────────────────────────────────────────────
+    app.add_handler(CommandHandler("admin",          cmd_admin))
+    app.add_handler(CommandHandler("broadcast",      cmd_broadcast))
+    app.add_handler(CommandHandler("globalstats",    cmd_globalstats))
+    app.add_handler(CommandHandler("settrial",       cmd_settrial))
+    app.add_handler(CommandHandler("setprice",       cmd_setprice))
+    app.add_handler(CommandHandler("setupi",         cmd_setupi))
+    app.add_handler(CommandHandler("addcreator",     cmd_addcreator))
+    app.add_handler(CommandHandler("bancreator",     cmd_bancreator))
+    app.add_handler(CommandHandler("renewcreator",   cmd_renewcreator))
+    app.add_handler(CommandHandler("viewuser",       cmd_viewuser))
+    app.add_handler(CommandHandler("viewcreator",    cmd_viewcreator))
+    app.add_handler(CommandHandler("listcreators",   cmd_listcreators))
+    app.add_handler(CommandHandler("listusers",      cmd_listusers))
+    app.add_handler(CommandHandler("dm",             cmd_dm))
+    app.add_handler(CommandHandler("delcampaign",    cmd_delcampaign))
+    app.add_handler(CommandHandler("addadmin",       cmd_addadmin))
+    app.add_handler(CommandHandler("export",         cmd_export))
+
+    # ── Creator commands ───────────────────────────────────────────
+    app.add_handler(CommandHandler("creator",            cmd_creator))
+    app.add_handler(CommandHandler("mycampaigns",        cmd_mycampaigns))
+    app.add_handler(CommandHandler("mystats",            cmd_mystats))
     app.add_handler(CommandHandler("materials",          cmd_materials))
     app.add_handler(CommandHandler("channels",           cmd_channels))
-    app.add_handler(CommandHandler("mycampaigns",        cmd_mycampaigns))
     app.add_handler(CommandHandler("broadcast_my_users", cmd_broadcast_my_users))
     app.add_handler(CommandHandler("renewpanel",         cmd_renewpanel))
+    app.add_handler(CommandHandler("togglecampaign",     cmd_togglecampaign))
 
-    # Specific callback before general router
+    # ── Callback + message handlers ────────────────────────────────
     app.add_handler(CallbackQueryHandler(callback_router))
-
-    # General message handler (broadcast inputs)
     app.add_handler(
         MessageHandler(
             (filters.TEXT | filters.PHOTO | filters.VIDEO | filters.Document.ALL)
@@ -1780,6 +2979,11 @@ def main():
             general_message_handler,
         )
     )
+    # Unknown command handler (must be last)
+    app.add_handler(MessageHandler(filters.COMMAND, cmd_unknown))
+
+    # ── Error handler ──────────────────────────────────────────────
+    app.add_error_handler(error_handler)
 
     logger.info("📡 Polling started…")
     app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
