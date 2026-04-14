@@ -3054,168 +3054,11 @@ async def post_init(app: Application):
     logger.info("🚀 ForceHub Bot started — %s", now_str())
 
 
-def main():
-    if not BOT_TOKEN:
-        logger.critical("❌ BOT_TOKEN is not set! Check your .env file.")
-        return
 
-    app = (
-        Application.builder()
-        .token(BOT_TOKEN)
-        .post_init(post_init)
-        .build()
-    )
+# ───────────────────────────────────────────────────────────────────────────
+# CREATOR ONBOARDING SYSTEM — defined before main()
+# ───────────────────────────────────────────────────────────────────────────
 
-    # ── Setup Conversation ─────────────────────────────────────────
-    setup_conv = ConversationHandler(
-        entry_points=[
-            CommandHandler("setup", cmd_setup),
-            CallbackQueryHandler(cmd_setup, pattern=r"^c_setup$"),  # button → same handler
-        ],
-        states={
-            SETUP_CHANNEL: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, setup_recv_channels)
-            ],
-            SETUP_MATERIAL_TYPE: [
-                CallbackQueryHandler(setup_recv_material_type, pattern=r"^mtype_")
-            ],
-            SETUP_MATERIAL_TITLE: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, setup_recv_title)
-            ],
-            SETUP_MATERIAL_CONTENT: [
-                MessageHandler(
-                    (filters.TEXT | filters.PHOTO | filters.VIDEO | filters.Document.ALL)
-                    & ~filters.COMMAND,
-                    setup_recv_content,
-                )
-            ],
-            SETUP_REFERRAL_COUNT: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, setup_recv_referral)
-            ],
-        },
-        fallbacks=[
-            CommandHandler("cancel", setup_cancel),
-            CallbackQueryHandler(setup_cancel, pattern=r"^setup_cancel$"),
-        ],
-        allow_reentry=True,
-    )
-
-    # ── Creator onboarding ConversationHandler ────────────────────
-    onboard_conv = ConversationHandler(
-        entry_points=[
-            CommandHandler("becomecreator", cmd_become_creator),
-            CallbackQueryHandler(cmd_become_creator, pattern=r"^onboard_start$"),
-        ],
-        states={
-            ONBOARD_CHANNEL: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, onboard_recv_channel)
-            ],
-        },
-        fallbacks=[
-            CommandHandler("cancel",       onboard_cancel),
-            CallbackQueryHandler(onboard_cancel, pattern=r"^onboard_cancel$"),
-        ],
-        allow_reentry=True,
-        name="onboard_conv",
-    )
-
-    # ── Create campaign ConversationHandler ────────────────────────
-    createcamp_conv = ConversationHandler(
-        entry_points=[
-            CommandHandler("createcampaign", cmd_createcampaign),
-            CallbackQueryHandler(cmd_createcampaign, pattern=r"^createcamp_new$"),
-        ],
-        states={
-            CREATECAMP_LINK: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, createcamp_recv_link)
-            ],
-            CREATECAMP_CHANNELS: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, createcamp_recv_channels)
-            ],
-        },
-        fallbacks=[
-            CommandHandler("cancel",         createcamp_cancel),
-            CallbackQueryHandler(createcamp_cancel, pattern=r"^createcamp_cancel$"),
-        ],
-        allow_reentry=True,
-        name="createcamp_conv",
-    )
-
-    # ── Register handlers (order matters) ─────────────────────────
-    # Patched /start handles unlock_ deep links
-    app.add_handler(CommandHandler("start",   cmd_start_patched))
-    # Onboarding BEFORE setup (lower group number = higher priority)
-    app.add_handler(onboard_conv)
-    app.add_handler(createcamp_conv)
-    app.add_handler(setup_conv)
-
-    # ── Universal commands ─────────────────────────────────────────
-    app.add_handler(CommandHandler("id",     cmd_id))
-    app.add_handler(CommandHandler("help",   cmd_help))
-
-    # ── Admin commands ─────────────────────────────────────────────
-    app.add_handler(CommandHandler("admin",          cmd_admin))
-    app.add_handler(CommandHandler("broadcast",      cmd_broadcast))
-    app.add_handler(CommandHandler("globalstats",    cmd_globalstats))
-    app.add_handler(CommandHandler("settrial",       cmd_settrial))
-    app.add_handler(CommandHandler("setprice",       cmd_setprice))
-    app.add_handler(CommandHandler("setupi",         cmd_setupi))
-    app.add_handler(CommandHandler("addcreator",     cmd_addcreator))
-    app.add_handler(CommandHandler("bancreator",     cmd_bancreator))
-    app.add_handler(CommandHandler("renewcreator",   cmd_renewcreator))
-    app.add_handler(CommandHandler("viewuser",       cmd_viewuser))
-    app.add_handler(CommandHandler("viewcreator",    cmd_viewcreator))
-    app.add_handler(CommandHandler("listcreators",   cmd_listcreators))
-    app.add_handler(CommandHandler("listusers",      cmd_listusers))
-    app.add_handler(CommandHandler("dm",             cmd_dm))
-    app.add_handler(CommandHandler("delcampaign",    cmd_delcampaign))
-    app.add_handler(CommandHandler("addadmin",       cmd_addadmin))
-    app.add_handler(CommandHandler("export",         cmd_export))
-
-    # ── Creator commands ───────────────────────────────────────────
-    app.add_handler(CommandHandler("creator",            cmd_creator))
-    app.add_handler(CommandHandler("mycampaigns",        cmd_mycampaigns))
-    app.add_handler(CommandHandler("mystats",            cmd_mystats))
-    app.add_handler(CommandHandler("materials",          cmd_materials))
-    app.add_handler(CommandHandler("channels",           cmd_channels))
-    app.add_handler(CommandHandler("broadcast_my_users", cmd_broadcast_my_users))
-    app.add_handler(CommandHandler("renewpanel",         cmd_renewpanel))
-    app.add_handler(CommandHandler("togglecampaign",     cmd_togglecampaign))
-
-    # ── New commands ──────────────────────────────────────────────
-    app.add_handler(CommandHandler("becomecreator",   cmd_become_creator))
-    app.add_handler(CommandHandler("createcampaign",  cmd_createcampaign))
-    app.add_handler(CommandHandler("dashboard",       cmd_dashboard))
-    app.add_handler(CommandHandler("broadcastusers",  cmd_broadcastusers))
-
-    # ── Channel admin detection ────────────────────────────────────
-    app.add_handler(ChatMemberHandler(handle_my_chat_member,
-                                      ChatMemberHandler.MY_CHAT_MEMBER))
-
-    # ── Verify callback (extended — must come BEFORE callback_router) ──
-    app.add_handler(CallbackQueryHandler(verify_callback_extended, pattern=r"^verify_"))
-
-    # ── Callback + message handlers ────────────────────────────────
-    app.add_handler(CallbackQueryHandler(callback_router))
-    app.add_handler(
-        MessageHandler(
-            (filters.TEXT | filters.PHOTO | filters.VIDEO | filters.Document.ALL)
-            & ~filters.COMMAND,
-            general_message_handler,
-        )
-    )
-    # Unknown command handler (must be last)
-    app.add_handler(MessageHandler(filters.COMMAND, cmd_unknown))
-
-    # ── Error handler ──────────────────────────────────────────────
-    app.add_error_handler(error_handler)
-
-    logger.info("📡 Polling started…")
-    app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
-
-
-if __name__ == "__main__":
-    main()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -4076,3 +3919,170 @@ async def onboard_text_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         reply_markup=kb_creator(),
     )
 
+
+
+def main():
+    if not BOT_TOKEN:
+        logger.critical("❌ BOT_TOKEN is not set! Check your .env file.")
+        return
+
+    app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .post_init(post_init)
+        .build()
+    )
+
+    # ── Setup Conversation ─────────────────────────────────────────
+    setup_conv = ConversationHandler(
+        entry_points=[
+            CommandHandler("setup", cmd_setup),
+            CallbackQueryHandler(cmd_setup, pattern=r"^c_setup$"),  # button → same handler
+        ],
+        per_message=False,
+        states={
+            SETUP_CHANNEL: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, setup_recv_channels)
+            ],
+            SETUP_MATERIAL_TYPE: [
+                CallbackQueryHandler(setup_recv_material_type, pattern=r"^mtype_")
+            ],
+            SETUP_MATERIAL_TITLE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, setup_recv_title)
+            ],
+            SETUP_MATERIAL_CONTENT: [
+                MessageHandler(
+                    (filters.TEXT | filters.PHOTO | filters.VIDEO | filters.Document.ALL)
+                    & ~filters.COMMAND,
+                    setup_recv_content,
+                )
+            ],
+            SETUP_REFERRAL_COUNT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, setup_recv_referral)
+            ],
+        },
+        fallbacks=[
+            CommandHandler("cancel", setup_cancel),
+            CallbackQueryHandler(setup_cancel, pattern=r"^setup_cancel$"),
+        ],
+        allow_reentry=True,
+    )
+
+    # ── Creator onboarding ConversationHandler ────────────────────
+    onboard_conv = ConversationHandler(
+        entry_points=[
+            CommandHandler("becomecreator", cmd_become_creator),
+            CallbackQueryHandler(cmd_become_creator, pattern=r"^onboard_start$"),
+        ],
+        per_message=False,
+        states={
+            ONBOARD_CHANNEL: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, onboard_recv_channel)
+            ],
+        },
+        fallbacks=[
+            CommandHandler("cancel",       onboard_cancel),
+            CallbackQueryHandler(onboard_cancel, pattern=r"^onboard_cancel$"),
+        ],
+        allow_reentry=True,
+        name="onboard_conv",
+    )
+
+    # ── Create campaign ConversationHandler ────────────────────────
+    createcamp_conv = ConversationHandler(
+        entry_points=[
+            CommandHandler("createcampaign", cmd_createcampaign),
+            CallbackQueryHandler(cmd_createcampaign, pattern=r"^createcamp_new$"),
+        ],
+        per_message=False,
+        states={
+            CREATECAMP_LINK: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, createcamp_recv_link)
+            ],
+            CREATECAMP_CHANNELS: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, createcamp_recv_channels)
+            ],
+        },
+        fallbacks=[
+            CommandHandler("cancel",         createcamp_cancel),
+            CallbackQueryHandler(createcamp_cancel, pattern=r"^createcamp_cancel$"),
+        ],
+        allow_reentry=True,
+        name="createcamp_conv",
+    )
+
+    # ── Register handlers (order matters) ─────────────────────────
+    # Patched /start handles unlock_ deep links
+    app.add_handler(CommandHandler("start",   cmd_start_patched))
+    # Onboarding BEFORE setup (lower group number = higher priority)
+    app.add_handler(onboard_conv)
+    app.add_handler(createcamp_conv)
+    app.add_handler(setup_conv)
+
+    # ── Universal commands ─────────────────────────────────────────
+    app.add_handler(CommandHandler("id",     cmd_id))
+    app.add_handler(CommandHandler("help",   cmd_help))
+
+    # ── Admin commands ─────────────────────────────────────────────
+    app.add_handler(CommandHandler("admin",          cmd_admin))
+    app.add_handler(CommandHandler("broadcast",      cmd_broadcast))
+    app.add_handler(CommandHandler("globalstats",    cmd_globalstats))
+    app.add_handler(CommandHandler("settrial",       cmd_settrial))
+    app.add_handler(CommandHandler("setprice",       cmd_setprice))
+    app.add_handler(CommandHandler("setupi",         cmd_setupi))
+    app.add_handler(CommandHandler("addcreator",     cmd_addcreator))
+    app.add_handler(CommandHandler("bancreator",     cmd_bancreator))
+    app.add_handler(CommandHandler("renewcreator",   cmd_renewcreator))
+    app.add_handler(CommandHandler("viewuser",       cmd_viewuser))
+    app.add_handler(CommandHandler("viewcreator",    cmd_viewcreator))
+    app.add_handler(CommandHandler("listcreators",   cmd_listcreators))
+    app.add_handler(CommandHandler("listusers",      cmd_listusers))
+    app.add_handler(CommandHandler("dm",             cmd_dm))
+    app.add_handler(CommandHandler("delcampaign",    cmd_delcampaign))
+    app.add_handler(CommandHandler("addadmin",       cmd_addadmin))
+    app.add_handler(CommandHandler("export",         cmd_export))
+
+    # ── Creator commands ───────────────────────────────────────────
+    app.add_handler(CommandHandler("creator",            cmd_creator))
+    app.add_handler(CommandHandler("mycampaigns",        cmd_mycampaigns))
+    app.add_handler(CommandHandler("mystats",            cmd_mystats))
+    app.add_handler(CommandHandler("materials",          cmd_materials))
+    app.add_handler(CommandHandler("channels",           cmd_channels))
+    app.add_handler(CommandHandler("broadcast_my_users", cmd_broadcast_my_users))
+    app.add_handler(CommandHandler("renewpanel",         cmd_renewpanel))
+    app.add_handler(CommandHandler("togglecampaign",     cmd_togglecampaign))
+
+    # ── New commands ──────────────────────────────────────────────
+    app.add_handler(CommandHandler("becomecreator",   cmd_become_creator))
+    app.add_handler(CommandHandler("createcampaign",  cmd_createcampaign))
+    app.add_handler(CommandHandler("dashboard",       cmd_dashboard))
+    app.add_handler(CommandHandler("broadcastusers",  cmd_broadcastusers))
+
+    # ── Channel admin detection ────────────────────────────────────
+    app.add_handler(ChatMemberHandler(handle_my_chat_member,
+                                      ChatMemberHandler.MY_CHAT_MEMBER))
+
+    # ── Verify callback (extended — must come BEFORE callback_router) ──
+    app.add_handler(CallbackQueryHandler(verify_callback_extended, pattern=r"^verify_"))
+
+    # ── Callback + message handlers ────────────────────────────────
+    app.add_handler(CallbackQueryHandler(callback_router))
+    app.add_handler(
+        MessageHandler(
+            (filters.TEXT | filters.PHOTO | filters.VIDEO | filters.Document.ALL)
+            & ~filters.COMMAND,
+            general_message_handler,
+        )
+    )
+    # Unknown command handler (must be last)
+    app.add_handler(MessageHandler(filters.COMMAND, cmd_unknown))
+
+    # ── Error handler ──────────────────────────────────────────────
+    app.add_error_handler(error_handler)
+
+    logger.info("📡 Polling started…")
+    app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
+
+
+if __name__ == "__main__":
+    main()
