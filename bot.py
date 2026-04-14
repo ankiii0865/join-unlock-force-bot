@@ -370,6 +370,35 @@ def is_super_admin(user_id: int) -> bool:
     return user_id in SUPER_ADMIN_IDS
 
 
+def can_use_creator_features(user_id: int) -> bool:
+    """Admin can ALWAYS use creator features, even without being registered."""
+    return is_creator(user_id) or is_admin(user_id)
+
+
+def creator_is_active(user_id: int) -> bool:
+    """Admin is always active. Creators check trial expiry."""
+    if is_admin(user_id):
+        return True
+    return db.is_creator_active(user_id)
+
+
+def ensure_admin_creator(user_id: int, username: str = "", name: str = "") -> dict:
+    """Auto-register admin as creator with unlimited trial if not already one."""
+    if not db.get_creator(user_id):
+        db.creators[str(user_id)] = {
+            "username": username,
+            "name": name or f"Admin_{user_id}",
+            "trial_start": "2000-01-01T00:00:00",
+            "trial_days": 99999,
+            "channels": [],
+            "materials": [],
+            "campaigns": [],
+            "joined_at": datetime.now().isoformat(),
+        }
+        db.save(force=True)
+    return db.get_creator(user_id)
+
+
 def is_creator(user_id: int) -> bool:
     return str(user_id) in db.creators
 
@@ -635,26 +664,32 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif is_creator(uid):
-        cr = db.get_creator(uid)
-        days = db.creator_days_left(uid)
-        status = "✅ Active" if db.is_creator_active(uid) else "❌ Expired"
+        cr     = db.get_creator(uid)
+        days   = db.creator_days_left(uid)
+        status = "✅ Active" if creator_is_active(uid) else "❌ Expired"
+        camps  = cr.get("campaigns", []) if cr else []
+        total_u = sum(db.analytics.get("unlock_success",{}).get(c,0) for c in camps)
         await update.message.reply_text(
-            f"👋 Welcome, *{cr.get('name', user.first_name)}*!\n\n"
-            f"🎨 *Creator Dashboard — ForceHub*\n"
-            f"━━━━━━━━━━━━━━━━━━━\n"
-            f"Status: {status} | ⏳ Days Left: `{days}`\n"
-            f"🎯 Campaigns: `{len(cr.get('campaigns', []))}` | "
-            f"📢 Channels: `{len(cr.get('channels', []))}`",
+            f"🎨 *Creator Panel — ForceHub*\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"👋 *{cr.get('name', user.first_name) if cr else user.first_name}*  |  `{uid}`\n"
+            f"Status: {status}  |  ⏳ `{days}` days left\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🎯 Campaigns: `{len(camps)}`  |  🔓 Unlocks: `{total_u}`\n"
+            f"📢 Channels: `{len(cr.get('channels',[]) if cr else [])}`\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🕐 `{now_str()}`",
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=kb_creator(),
         )
 
     else:
         await update.message.reply_text(
-            f"🚀 Welcome to *ForceHub*, {user.first_name}!\n\n"
-            f"The premium content unlock platform.\n"
-            f"📢 Join channels → 🔓 Unlock exclusive content!\n\n"
-            f"Use the menu below to get started 👇",
+            f"🚀 *Welcome to ForceHub*, {user.first_name}!\n\n"
+            f"🔓 *Unlock premium content* by joining channels.\n\n"
+            f"Get a campaign link from a creator and tap it — "
+            f"the bot will guide you step by step!\n\n"
+            f"🆔 Your ID: `{uid}`",
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=kb_user(),
         )
@@ -845,46 +880,48 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     #  CREATOR MENU CALLBACKS
     # ══════════════════════════════════════════
     elif data == "c_dash":
-        if not is_creator(uid):
-            await query.answer("❌ Not a creator!", show_alert=True); return
-        cr   = db.get_creator(uid)
-        days = db.creator_days_left(uid)
-        status = "✅ Active" if db.is_creator_active(uid) else "❌ Expired"
-        camps  = cr.get("campaigns", [])
-        total_unlocks = sum(
-            db.analytics.get("unlock_success", {}).get(cid, 0) for cid in camps
-        )
+        if not can_use_creator_features(uid):
+            await query.answer("❌ Creator access required!", show_alert=True); return
+        if is_admin(uid):
+            ensure_admin_creator(uid, query.from_user.username or "", query.from_user.first_name or "")
+        cr     = db.get_creator(uid)
+        days   = db.creator_days_left(uid)
+        status = "✅ Active" if creator_is_active(uid) else "❌ Expired"
+        camps  = cr.get("campaigns", []) if cr else []
+        total_unlocks = sum(db.analytics.get("unlock_success",{}).get(cid,0) for cid in camps)
+        total_clicks  = sum(db.analytics.get("campaign_clicks",{}).get(cid,0) for cid in camps)
+        badge  = "👑 Admin+Creator" if is_admin(uid) else "🎨 Creator"
+        expiry_line = "♾ No expiry (Admin)" if is_admin(uid) else f"⏳ {days} days left"
         await query.edit_message_text(
-            f"📊 *Creator Dashboard*\n"
-            f"━━━━━━━━━━━━━━━━━━━\n"
-            f"👤 *{cr.get('name', 'Creator')}*\n"
-            f"Status: {status} | ⏳ `{days}` days left\n"
-            f"━━━━━━━━━━━━━━━━━━━\n"
-            f"📦 Materials: `{len(cr.get('materials', []))}`\n"
+            f"{badge} *Dashboard*\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"👤 *{cr.get('name','Creator') if cr else '?'}*  |  `{uid}`\n"
+            f"Status: {status}  |  {expiry_line}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📦 Materials: `{len(cr.get('materials',[]) if cr else [])}`\n"
             f"🎯 Campaigns: `{len(camps)}`\n"
-            f"📢 Channels:  `{len(cr.get('channels', []))}`\n"
-            f"🔓 Total Unlocks: `{total_unlocks}`",
+            f"📢 Channels:  `{len(cr.get('channels',[]) if cr else [])}`\n"
+            f"👆 Clicks:    `{total_clicks}`  |  🔓 Unlocks: `{total_unlocks}`",
             parse_mode=ParseMode.MARKDOWN, reply_markup=kb_creator(),
         )
 
     elif data == "c_setup":
-        if not is_creator(uid):
-            await query.answer("❌ Not a creator!", show_alert=True); return
-        if not db.is_creator_active(uid):
-            await query.answer("⏰ Subscription expired!", show_alert=True); return
-        # Trigger setup conversation via fake command context
-        await query.edit_message_text(
-            "🔧 Use the /setup command to create a new campaign.",
-            parse_mode=ParseMode.MARKDOWN, reply_markup=kb_back_creator(),
-        )
+        # This is handled by the ConversationHandler entry point below
+        # (CallbackQueryHandler pattern "^c_setup$" is in setup_conv entry_points)
+        # Fallback in case it reaches here
+        if not can_use_creator_features(uid):
+            await query.answer("❌ Creator access required!", show_alert=True); return
+        await query.answer()
+        # Nothing — ConversationHandler handles it
 
     elif data == "c_channels":
-        if not is_creator(uid):
-            await query.answer("❌ Not a creator!", show_alert=True); return
-        if not db.is_creator_active(uid):
-            await query.answer("⏰ Subscription expired!", show_alert=True); return
+        if not can_use_creator_features(uid):
+            await query.answer("❌ Creator access required!", show_alert=True); return
+        if not creator_is_active(uid):
+            await query.answer("⏰ Subscription expired! Use /renewpanel", show_alert=True); return
         cr = db.get_creator(uid)
-        ch_list = cr.get("channels", [])
+        if cr is None and is_admin(uid): cr = ensure_admin_creator(uid)
+        ch_list = cr.get("channels", []) if cr else []
         text = "📢 *Your Channels*\n\n"
         text += ("\n".join(f"{i+1}. `{ch}`" for i, ch in enumerate(ch_list))
                  if ch_list else "No channels added yet.\nUse /setup to add channels.")
@@ -892,10 +929,10 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                       reply_markup=kb_back_creator())
 
     elif data == "c_materials":
-        if not is_creator(uid):
-            await query.answer("❌ Not a creator!", show_alert=True); return
-        if not db.is_creator_active(uid):
-            await query.answer("⏰ Subscription expired!", show_alert=True); return
+        if not can_use_creator_features(uid):
+            await query.answer("❌ Creator access required!", show_alert=True); return
+        if not creator_is_active(uid):
+            await query.answer("⏰ Subscription expired! Use /renewpanel", show_alert=True); return
         cr  = db.get_creator(uid)
         mat_ids = cr.get("materials", [])
         text = "📦 *Your Materials*\n\n"
@@ -909,8 +946,8 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                       reply_markup=kb_back_creator())
 
     elif data == "c_stats":
-        if not is_creator(uid):
-            await query.answer("❌ Not a creator!", show_alert=True); return
+        if not can_use_creator_features(uid):
+            await query.answer("❌ Creator access required!", show_alert=True); return
         cr    = db.get_creator(uid)
         camps = cr.get("campaigns", [])
         text  = "📈 *Campaign Analytics*\n\n"
@@ -949,10 +986,10 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif data == "c_broadcast":
-        if not is_creator(uid):
-            await query.answer("❌ Not a creator!", show_alert=True); return
-        if not db.is_creator_active(uid):
-            await query.answer("⏰ Subscription expired!", show_alert=True); return
+        if not can_use_creator_features(uid):
+            await query.answer("❌ Creator access required!", show_alert=True); return
+        if not creator_is_active(uid):
+            await query.answer("⏰ Subscription expired! Use /renewpanel", show_alert=True); return
         context.user_data["cbcast_step"] = "content"
         await query.edit_message_text(
             "📣 *Broadcast to Your Users*\n\n"
@@ -967,7 +1004,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ── NEW: My Campaigns list ────────────────────────────────────
     elif data == "c_campaigns":
-        if not is_creator(uid): await query.answer("❌ Not a creator!", show_alert=True); return
+        if not can_use_creator_features(uid): await query.answer("❌ Creator access required!", show_alert=True); return
         cr      = db.get_creator(uid)
         camps   = cr.get("campaigns", [])
         if not camps:
@@ -1002,7 +1039,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ── Toggle campaign active/inactive ──────────────────────────
     elif data.startswith("c_togglecamp_"):
-        if not is_creator(uid): await query.answer("❌", show_alert=True); return
+        if not can_use_creator_features(uid): await query.answer("❌ Creator access required!", show_alert=True); return
         cid  = data[len("c_togglecamp_"):]
         camp = db.campaigns.get(cid)
         if not camp or camp.get("creator_id") != str(uid):
@@ -1037,7 +1074,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ── Get share link for specific campaign ──────────────────────
     elif data.startswith("c_camplink_"):
-        if not is_creator(uid): await query.answer("❌", show_alert=True); return
+        if not can_use_creator_features(uid): await query.answer("❌ Creator access required!", show_alert=True); return
         cid    = data[len("c_camplink_"):]
         camp   = db.campaigns.get(cid)
         if not camp or camp.get("creator_id") != str(uid):
@@ -1073,7 +1110,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ── All share links at once ───────────────────────────────────
     elif data == "c_links":
-        if not is_creator(uid): await query.answer("❌ Not a creator!", show_alert=True); return
+        if not can_use_creator_features(uid): await query.answer("❌ Creator access required!", show_alert=True); return
         cr     = db.get_creator(uid)
         camps  = cr.get("campaigns", [])
         bot_me = await context.bot.get_me()
@@ -1548,8 +1585,9 @@ async def general_message_handler(update: Update, context: ContextTypes.DEFAULT_
 
     # ══════════════════════════════════════════════════════════════
     #  ADMIN INLINE ACTION HANDLER  (processes text inputs for admin prompts)
+    #  NOTE: Only fires when NOT inside the setup ConversationHandler
     # ══════════════════════════════════════════════════════════════
-    if is_admin(uid) and context.user_data.get("admin_action"):
+    if is_admin(uid) and context.user_data.get("admin_action") and not context.user_data.get("setup"):
         action = context.user_data.pop("admin_action")
         text   = (msg.text or "").strip()
 
@@ -1834,8 +1872,8 @@ async def general_message_handler(update: Update, context: ContextTypes.DEFAULT_
         return
 
     # ── Creator broadcast: collect content ───────────────────────
-    if is_creator(uid) and context.user_data.get("cbcast_step") == "content":
-        if not db.is_creator_active(uid):
+    if can_use_creator_features(uid) and context.user_data.get("cbcast_step") == "content":
+        if not creator_is_active(uid):
             await msg.reply_text("⏰ Subscription expired. Use /renewpanel")
             context.user_data.pop("cbcast_step", None)
             return
@@ -1887,28 +1925,50 @@ async def general_message_handler(update: Update, context: ContextTypes.DEFAULT_
 # SETUP MATERIAL CONVERSATION
 # ─────────────────────────────────────────────────────────────────
 
-async def cmd_setup(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    if not is_creator(uid):
-        await update.message.reply_text("❌ Not a registered creator. Contact admin.")
-        return ConversationHandler.END
-    if not db.is_creator_active(uid):
-        await update.message.reply_text("⏰ Subscription expired! Use /renewpanel")
-        return ConversationHandler.END
-
-    context.user_data.clear()
-    context.user_data["setup"] = {}
-
-    await update.message.reply_text(
+async def _send_setup_step1(update: Update) -> None:
+    """Send Step 1 message — works for both message and callback query updates."""
+    text = (
         "🔧 *Create New Campaign — Step 1 / 5*\n\n"
         "Send the channel username(s) users must join.\n"
         "Format: `@channel1 @channel2`\n\n"
-        "⚠️ Bot must be *admin* in those channels!",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton("❌ Cancel", callback_data="setup_cancel")]]
-        ),
+        "⚠️ Bot must be *admin* in those channels!"
     )
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="setup_cancel")]])
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+    else:
+        await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+
+
+async def cmd_setup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid  = update.effective_user.id
+    user = update.effective_user
+
+    if not can_use_creator_features(uid):
+        msg = "❌ You need creator access to set up campaigns.\n\nContact admin to get registered."
+        if update.callback_query:
+            await update.callback_query.answer(msg, show_alert=True)
+        else:
+            await update.message.reply_text(msg)
+        return ConversationHandler.END
+
+    if not creator_is_active(uid):
+        msg = "⏰ Your creator subscription has expired! Use /renewpanel to renew."
+        if update.callback_query:
+            await update.callback_query.answer(msg, show_alert=True)
+        else:
+            await update.message.reply_text(msg)
+        return ConversationHandler.END
+
+    # Auto-register admin as creator if needed
+    if is_admin(uid):
+        ensure_admin_creator(uid, user.username or "", user.first_name or "")
+
+    context.user_data.pop("admin_action", None)  # Clear any stale admin action
+    context.user_data["setup"] = {}
+
+    await _send_setup_step1(update)
     return SETUP_CHANNEL
 
 
@@ -1953,12 +2013,16 @@ async def setup_recv_channels(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     context.user_data["setup"]["channels"] = valid
 
-    # Persist to creator
-    cr = db.get_creator(update.effective_user.id)
-    for ch in valid:
-        if ch not in cr.get("channels", []):
-            cr.setdefault("channels", []).append(ch)
-    db.save()
+    # Persist to creator (admin auto-creates their record)
+    creator_uid = update.effective_user.id
+    cr = db.get_creator(creator_uid)
+    if cr is None and is_admin(creator_uid):
+        cr = ensure_admin_creator(creator_uid)
+    if cr is not None:
+        for ch in valid:
+            if ch not in cr.get("channels", []):
+                cr.setdefault("channels", []).append(ch)
+        db.save()
 
     await update.message.reply_text(
         f"✅ Channels: {', '.join(valid)}\n\n"
@@ -2072,7 +2136,10 @@ async def setup_recv_referral(update: Update, context: ContextTypes.DEFAULT_TYPE
         "created_at":  datetime.now().isoformat(),
     }
     cr = db.get_creator(uid)
-    cr.setdefault("materials", []).append(material_id)
+    if cr is None and is_admin(uid):
+        cr = ensure_admin_creator(uid)
+    if cr:
+        cr.setdefault("materials", []).append(material_id)
 
     # ── Create campaign ───────────────────────────────────────────
     campaign_id = db.create_campaign(uid, material_id, setup["channels"], count)
@@ -2266,13 +2333,22 @@ async def cmd_renewpanel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     upi   = db.settings.get("upi_id", "N/A")
     days  = db.creator_days_left(uid)
 
-    if not is_creator(uid):
+    if not can_use_creator_features(uid):
         await update.message.reply_text(
-            "❌ Not a registered creator. Contact admin to get access."
+            "❌ You don't have creator access.\n"
+            f"Ask admin to run: `/addcreator {uid}`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+    if is_admin(uid):
+        await update.message.reply_text(
+            "👑 *You are Super Admin — no renewal needed!*\n"
+            "Your creator access never expires.",
+            parse_mode=ParseMode.MARKDOWN,
         )
         return
 
-    status = "✅ Active" if db.is_creator_active(uid) else "❌ Expired"
+    status = "✅ Active" if creator_is_active(uid) else "❌ Expired"
     await update.message.reply_text(
         f"🔄 *Renew Creator Panel*\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
@@ -2290,8 +2366,9 @@ async def cmd_renewpanel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_mycampaigns(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    if not is_creator(uid):
-        await update.message.reply_text("❌ Not a creator."); return
+    if not can_use_creator_features(uid):
+        await update.message.reply_text("❌ Creator access required."); return
+    if is_admin(uid): ensure_admin_creator(uid)
     cr    = db.get_creator(uid)
     camps = cr.get("campaigns", [])
     if not camps:
@@ -2316,13 +2393,13 @@ async def cmd_mycampaigns(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_materials(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    if not is_creator(uid):
-        await update.message.reply_text("❌ Not a creator."); return
-    if not db.is_creator_active(uid):
+    if not can_use_creator_features(uid):
+        await update.message.reply_text("❌ Creator access required."); return
+    if not creator_is_active(uid):
         await update.message.reply_text("⏰ Subscription expired! Use /renewpanel"); return
-
+    if is_admin(uid): ensure_admin_creator(uid)
     cr      = db.get_creator(uid)
-    mat_ids = cr.get("materials", [])
+    mat_ids = cr.get("materials", []) if cr else []
     text    = "📦 *Your Materials:*\n\n"
     if mat_ids:
         for mid in mat_ids[-10:]:
@@ -2335,13 +2412,13 @@ async def cmd_materials(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_channels(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    if not is_creator(uid):
-        await update.message.reply_text("❌ Not a creator."); return
-    if not db.is_creator_active(uid):
+    if not can_use_creator_features(uid):
+        await update.message.reply_text("❌ Creator access required."); return
+    if not creator_is_active(uid):
         await update.message.reply_text("⏰ Subscription expired! Use /renewpanel"); return
-
+    if is_admin(uid): ensure_admin_creator(uid)
     cr       = db.get_creator(uid)
-    channels = cr.get("channels", [])
+    channels = cr.get("channels", []) if cr else []
     text     = "📢 *Your Channels:*\n\n"
     text    += ("\n".join(f"• `{ch}`" for ch in channels)
                 if channels else "No channels yet.\nUse /setup to add channels.")
@@ -2350,9 +2427,10 @@ async def cmd_channels(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_broadcast_my_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    if not is_creator(uid):
-        await update.message.reply_text("❌ Not a creator."); return
-    if not db.is_creator_active(uid):
+    if not can_use_creator_features(uid):
+        await update.message.reply_text("❌ Creator access required."); return
+    if is_admin(uid): ensure_admin_creator(uid)
+    if not creator_is_active(uid):
         await update.message.reply_text("⏰ Subscription expired! Use /renewpanel"); return
 
     context.user_data["cbcast_step"] = "content"
@@ -2402,27 +2480,32 @@ async def cmd_creator(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/creator — dedicated creator panel shortcut"""
     uid  = update.effective_user.id
     user = update.effective_user
-    if not is_creator(uid):
+    if not can_use_creator_features(uid):
         await update.message.reply_text(
-            "❌ You are not a registered creator.\n\n"
-            "Contact admin to get creator access.",
+            "❌ You don't have creator access yet.\n\n"
+            "Ask admin to run: `/addcreator {uid}`".format(uid=uid),
             parse_mode=ParseMode.MARKDOWN,
         )
         return
+    # Auto-register admin as creator if they're not already
+    if is_admin(uid):
+        ensure_admin_creator(uid, user.username or "", user.first_name or "")
     cr     = db.get_creator(uid)
     days   = db.creator_days_left(uid)
-    status = "✅ Active" if db.is_creator_active(uid) else "❌ Expired"
-    camps  = cr.get("campaigns", [])
+    status = "✅ Active" if creator_is_active(uid) else "❌ Expired"
+    camps  = cr.get("campaigns", []) if cr else []
     total_unlocks = sum(db.analytics.get("unlock_success",{}).get(cid,0) for cid in camps)
     total_clicks  = sum(db.analytics.get("campaign_clicks",{}).get(cid,0) for cid in camps)
+    badge  = "👑 Admin+Creator" if is_admin(uid) else "🎨 Creator"
+    expiry = "♾ No expiry (Admin)" if is_admin(uid) else f"⏳ {days} days left"
     await update.message.reply_text(
-        f"🎨 *Creator Panel — ForceHub*\n"
+        f"{badge} *Panel — ForceHub*\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"👤 *{cr.get('name', user.first_name)}*  |  `{uid}`\n"
-        f"Status: {status}  |  ⏳ `{days}` days left\n"
+        f"👤 *{cr.get('name', user.first_name) if cr else user.first_name}*  |  `{uid}`\n"
+        f"Status: {status}  |  {expiry}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🎯 Campaigns: `{len(camps)}`  |  📦 Materials: `{len(cr.get('materials',[]))}`\n"
-        f"📢 Channels:  `{len(cr.get('channels',[]))}`\n"
+        f"🎯 Campaigns: `{len(camps)}`  |  📦 Materials: `{len(cr.get('materials',[]) if cr else [])}`\n"
+        f"📢 Channels:  `{len(cr.get('channels',[]) if cr else [])}`\n"
         f"👆 Total Clicks: `{total_clicks}`  |  🔓 Unlocks: `{total_unlocks}`\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"🕐 `{now_str()}`",
@@ -2515,10 +2598,11 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_mystats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/mystats — creator personal analytics"""
     uid = update.effective_user.id
-    if not is_creator(uid):
-        await update.message.reply_text("❌ Not a creator."); return
+    if not can_use_creator_features(uid):
+        await update.message.reply_text("❌ Creator access required."); return
+    if is_admin(uid): ensure_admin_creator(uid)
     cr    = db.get_creator(uid)
-    camps = cr.get("campaigns", [])
+    camps = cr.get("campaigns", []) if cr else []
     text  = "📈 *Your Analytics — ForceHub*\n\n"
     total_clicks = total_verif = total_unlocks = 0
     for cid in camps:
@@ -2670,7 +2754,7 @@ async def cmd_delcampaign(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_togglecampaign(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/togglecampaign <id> — admin or creator: toggle campaign active/inactive"""
     uid  = update.effective_user.id
-    if not (is_admin(uid) or is_creator(uid)):
+    if not can_use_creator_features(uid):
         await update.message.reply_text("❌ No access."); return
     if not context.args:
         await update.message.reply_text("Usage: `/togglecampaign <campaign_id>`",
@@ -2904,6 +2988,7 @@ def main():
     setup_conv = ConversationHandler(
         entry_points=[
             CommandHandler("setup", cmd_setup),
+            CallbackQueryHandler(cmd_setup, pattern=r"^c_setup$"),  # button → same handler
         ],
         states={
             SETUP_CHANNEL: [
