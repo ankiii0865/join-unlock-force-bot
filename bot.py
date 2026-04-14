@@ -27,11 +27,13 @@ from telegram.ext import (
     Application,
     CommandHandler,
     CallbackQueryHandler,
+    ChatMemberHandler,
     MessageHandler,
     ConversationHandler,
     filters,
     ContextTypes,
 )
+from telegram import ChatMemberAdministrator
 from telegram.constants import ParseMode
 from telegram.error import TelegramError, Forbidden, BadRequest
 from dotenv import load_dotenv
@@ -77,6 +79,13 @@ CONFIG_FILE = DATA_DIR / "forcehub_config.json"
     SETUP_MATERIAL_CONTENT,
     SETUP_REFERRAL_COUNT,
 ) = range(5)
+
+# ── Creator onboarding + createcampaign conversation states ───────────────────
+(
+    ONBOARD_CHANNEL,           # 5 — waiting for channel username
+    CREATECAMP_LINK,           # 6 — waiting for unlock content link
+    CREATECAMP_CHANNELS,       # 7 — waiting for required channel(s)
+) = range(5, 8)
 
 # ─────────────────────────────────────────────────────────────────
 # DATA MANAGER  (single JSON, loaded once, saved periodically)
@@ -541,6 +550,7 @@ def kb_user() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🔓 Unlock Content",     callback_data="u_unlock")],
         [InlineKeyboardButton("📚 My Unlocks",         callback_data="u_unlocks"),
          InlineKeyboardButton("👥 Referral Progress",  callback_data="u_referral")],
+        [InlineKeyboardButton("🚀 Become Creator",     callback_data="u_become_creator")],
         [InlineKeyboardButton("❓ Help",               callback_data="u_help")],
     ])
 
@@ -686,9 +696,12 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(
             f"🚀 *Welcome to ForceHub*, {user.first_name}!\n\n"
-            f"🔓 *Unlock premium content* by joining channels.\n\n"
-            f"Get a campaign link from a creator and tap it — "
-            f"the bot will guide you step by step!\n\n"
+            f"🔓 *Unlock premium content* by joining channels.\n"
+            f"Get a campaign link from a creator and tap it!\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🎨 *Are you a creator?*\n"
+            f"Tap *🚀 Become Creator* to protect your content\n"
+            f"& build your own unlock campaigns — for free!\n\n"
             f"🆔 Your ID: `{uid}`",
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=kb_user(),
@@ -868,13 +881,53 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "u_help":
         await query.edit_message_text(
-            "❓ *Help*\n\n"
+            "❓ *Help — ForceHub*\n\n"
             "🔓 *Unlock Content:* Open a campaign link from a creator\n"
-            "📚 *My Unlocks:* View content you've already unlocked\n"
-            "👥 *Referrals:* Invite friends to earn bonus unlocks\n\n"
+            "📚 *My Unlocks:* View content you\'ve already unlocked\n"
+            "👥 *Referrals:* Invite friends to earn bonus unlocks\n"
+            "🚀 *Become Creator:* Set up your own unlock campaigns\n\n"
             "Need support? Contact the creator or admin.",
             parse_mode=ParseMode.MARKDOWN, reply_markup=kb_back_user(),
         )
+
+    elif data == "u_become_creator":
+        if can_use_creator_features(uid):
+            # Already a creator — go straight to creator dashboard
+            ensure_admin_creator(uid, query.from_user.username or "", query.from_user.first_name or "")
+            cr     = db.get_creator(uid)
+            days   = db.creator_days_left(uid)
+            status = "✅ Active" if creator_is_active(uid) else "❌ Expired"
+            camps  = cr.get("campaigns", []) if cr else []
+            total_u = sum(db.analytics.get("unlock_success",{}).get(c,0) for c in camps)
+            await query.edit_message_text(
+                f"🎨 *Creator Panel*\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"👤 *{cr.get('name', query.from_user.first_name) if cr else query.from_user.first_name}*\n"
+                f"Status: {status}\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🎯 Campaigns: `{len(camps)}` | 🔓 Unlocks: `{total_u}`",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=kb_creator(),
+            )
+        else:
+            # Not yet a creator — show onboarding info + trigger via command
+            bot_me = await context.bot.get_me()
+            await query.edit_message_text(
+                f"🚀 *Creator Mode — ForceHub*\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"Protect your content with force-subscribe campaigns.\n\n"
+                f"*To get started:*\n"
+                f"1️⃣ Add @{bot_me.username} as *Admin* in your channel\n"
+                f"2️⃣ Grant: *Post Messages* + *Invite Users* permissions\n"
+                f"3️⃣ Tap the button below to connect your channel\n\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"💡 *It\'s completely free!*",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔗 Connect My Channel", callback_data="onboard_start")],
+                    [InlineKeyboardButton("🔙 Back",               callback_data="u_back")],
+                ]),
+            )
 
     # ══════════════════════════════════════════
     #  CREATOR MENU CALLBACKS
@@ -1153,6 +1206,26 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("🔙 Back", callback_data="c_dash")]
             ]),
         )
+
+    # ══════════════════════════════════════════
+    #  ONBOARDING CALLBACKS  (non-conv fallback)
+    # ══════════════════════════════════════════
+    elif data == "onboard_start":
+        # Route into the onboarding ConversationHandler via answer + instruction
+        bot_me = await context.bot.get_me()
+        await query.edit_message_text(
+            f"🚀 *Creator Onboarding — Step 1/2*\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Make sure @{bot_me.username} is *Admin* in your channel\n"
+            f"with *Post Messages* and *Invite Users* permissions.\n\n"
+            f"Then send your channel username:\n"
+            f"Example: `@yourchannelname`",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ Cancel", callback_data="u_back")]
+            ]),
+        )
+        context.user_data["onboard_from_callback"] = True
 
     # ══════════════════════════════════════════
     #  ADMIN MENU CALLBACKS  (full access)
@@ -1828,6 +1901,11 @@ async def general_message_handler(update: Update, context: ContextTypes.DEFAULT_
             await msg.reply_text(f"✅ UPI updated: `{text}`",
                                  parse_mode=ParseMode.MARKDOWN, reply_markup=kb_back_admin())
         return  # ← Don't fall through to broadcast handlers
+
+    # ── Callback-triggered onboarding: catch channel username ─────
+    if context.user_data.get("onboard_from_callback") and not context.user_data.get("setup"):
+        await onboard_text_handler(update, context)
+        return
 
     # ── Admin broadcast: collect content ──────────────────────────
     if is_admin(uid) and context.user_data.get("bcast_step") == "content":
@@ -2905,19 +2983,23 @@ async def post_init(app: Application):
     """Register commands and start background tasks."""
     # ── All users ──────────────────────────────────────────────────
     user_commands = [
-        BotCommand("start",  "🚀 Main menu"),
-        BotCommand("id",     "🆔 Your Telegram ID"),
-        BotCommand("help",   "❓ Help & commands"),
+        BotCommand("start",          "🚀 Main menu"),
+        BotCommand("id",             "🆔 Your Telegram ID"),
+        BotCommand("help",           "❓ Help & commands"),
+        BotCommand("becomecreator",  "🎨 Become a creator"),
     ]
     # ── Creator only ───────────────────────────────────────────────
     creator_commands = user_commands + [
         BotCommand("creator",            "🎨 Creator panel"),
-        BotCommand("setup",              "➕ Create new campaign"),
+        BotCommand("createcampaign",     "➕ Create unlock campaign"),
+        BotCommand("dashboard",          "📊 Creator dashboard"),
+        BotCommand("broadcastusers",     "📣 Broadcast to your users"),
+        BotCommand("setup",              "🔧 Advanced campaign setup"),
         BotCommand("mycampaigns",        "🎯 Your campaigns"),
         BotCommand("mystats",            "📈 Your analytics"),
         BotCommand("materials",          "📦 Manage materials"),
         BotCommand("channels",           "📢 Manage channels"),
-        BotCommand("broadcast_my_users", "📣 Broadcast to your users"),
+        BotCommand("broadcast_my_users", "📣 Broadcast (alias)"),
         BotCommand("togglecampaign",     "🔁 Toggle campaign on/off"),
         BotCommand("renewpanel",         "🔄 Renew subscription"),
     ]
@@ -3018,8 +3100,53 @@ def main():
         allow_reentry=True,
     )
 
+    # ── Creator onboarding ConversationHandler ────────────────────
+    onboard_conv = ConversationHandler(
+        entry_points=[
+            CommandHandler("becomecreator", cmd_become_creator),
+            CallbackQueryHandler(cmd_become_creator, pattern=r"^onboard_start$"),
+        ],
+        states={
+            ONBOARD_CHANNEL: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, onboard_recv_channel)
+            ],
+        },
+        fallbacks=[
+            CommandHandler("cancel",       onboard_cancel),
+            CallbackQueryHandler(onboard_cancel, pattern=r"^onboard_cancel$"),
+        ],
+        allow_reentry=True,
+        name="onboard_conv",
+    )
+
+    # ── Create campaign ConversationHandler ────────────────────────
+    createcamp_conv = ConversationHandler(
+        entry_points=[
+            CommandHandler("createcampaign", cmd_createcampaign),
+            CallbackQueryHandler(cmd_createcampaign, pattern=r"^createcamp_new$"),
+        ],
+        states={
+            CREATECAMP_LINK: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, createcamp_recv_link)
+            ],
+            CREATECAMP_CHANNELS: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, createcamp_recv_channels)
+            ],
+        },
+        fallbacks=[
+            CommandHandler("cancel",         createcamp_cancel),
+            CallbackQueryHandler(createcamp_cancel, pattern=r"^createcamp_cancel$"),
+        ],
+        allow_reentry=True,
+        name="createcamp_conv",
+    )
+
     # ── Register handlers (order matters) ─────────────────────────
-    app.add_handler(CommandHandler("start",   cmd_start))
+    # Patched /start handles unlock_ deep links
+    app.add_handler(CommandHandler("start",   cmd_start_patched))
+    # Onboarding BEFORE setup (lower group number = higher priority)
+    app.add_handler(onboard_conv)
+    app.add_handler(createcamp_conv)
     app.add_handler(setup_conv)
 
     # ── Universal commands ─────────────────────────────────────────
@@ -3055,6 +3182,19 @@ def main():
     app.add_handler(CommandHandler("renewpanel",         cmd_renewpanel))
     app.add_handler(CommandHandler("togglecampaign",     cmd_togglecampaign))
 
+    # ── New commands ──────────────────────────────────────────────
+    app.add_handler(CommandHandler("becomecreator",   cmd_become_creator))
+    app.add_handler(CommandHandler("createcampaign",  cmd_createcampaign))
+    app.add_handler(CommandHandler("dashboard",       cmd_dashboard))
+    app.add_handler(CommandHandler("broadcastusers",  cmd_broadcastusers))
+
+    # ── Channel admin detection ────────────────────────────────────
+    app.add_handler(ChatMemberHandler(handle_my_chat_member,
+                                      ChatMemberHandler.MY_CHAT_MEMBER))
+
+    # ── Verify callback (extended — must come BEFORE callback_router) ──
+    app.add_handler(CallbackQueryHandler(verify_callback_extended, pattern=r"^verify_"))
+
     # ── Callback + message handlers ────────────────────────────────
     app.add_handler(CallbackQueryHandler(callback_router))
     app.add_handler(
@@ -3076,3 +3216,863 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  CREATOR ONBOARDING SYSTEM
+#  Self-service: any user can become a creator by connecting their channel
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ── Keyboards ──────────────────────────────────────────────────────────────────
+
+def kb_onboard_cancel() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="onboard_cancel")]])
+
+
+def kb_creator_simple() -> InlineKeyboardMarkup:
+    """Minimal inline creator menu for newly onboarded creators."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📊 Dashboard",       callback_data="c_dash")],
+        [InlineKeyboardButton("➕ Create Campaign", callback_data="c_setup"),
+         InlineKeyboardButton("🔗 My Links",        callback_data="c_links")],
+        [InlineKeyboardButton("📣 Broadcast",       callback_data="c_broadcast"),
+         InlineKeyboardButton("⚙️ Settings",        callback_data="c_help")],
+    ])
+
+
+# ── Channel verification helper ────────────────────────────────────────────────
+
+async def verify_channel_and_permissions(bot, channel: str) -> dict:
+    """
+    Verify:
+      1. Channel exists / bot can access it
+      2. Bot is admin in the channel
+      3. Bot has can_post_messages + can_invite_users
+    Returns {ok: bool, reason: str, chat_id: int|None, title: str}
+    """
+    try:
+        chat = await bot.get_chat(channel)
+    except Exception as e:
+        return {"ok": False, "reason": f"Channel `{channel}` not found or inaccessible.\n_{e}_"}
+
+    try:
+        me     = await bot.get_me()
+        member = await bot.get_chat_member(chat.id, me.id)
+    except Exception as e:
+        return {"ok": False, "reason": f"Could not check bot status: `{e}`"}
+
+    if member.status not in ("administrator", "creator"):
+        return {
+            "ok": False,
+            "reason": (
+                f"❌ Bot is *not admin* in `{channel}`.\n\n"
+                f"Please:\n"
+                f"1️⃣ Open your channel settings\n"
+                f"2️⃣ Go to *Administrators* → *Add Admin*\n"
+                f"3️⃣ Search `@{(await bot.get_me()).username}` and add\n"
+                f"4️⃣ Enable *Post Messages* + *Invite Users*\n"
+                f"5️⃣ Then send the channel username again"
+            )
+        }
+
+    # Check permissions (only for ChatMemberAdministrator)
+    if member.status == "administrator":
+        can_post   = getattr(member, "can_post_messages",   True)
+        can_invite = getattr(member, "can_invite_users",    True)
+        missing = []
+        if not can_post:   missing.append("*Post Messages*")
+        if not can_invite: missing.append("*Invite Users*")
+        if missing:
+            return {
+                "ok": False,
+                "reason": (
+                    f"⚠️ Bot is admin but missing permissions:\n"
+                    + "\n".join(f"  • {p}" for p in missing)
+                    + "\n\nPlease grant these in the channel admin settings."
+                )
+            }
+
+    return {
+        "ok":      True,
+        "chat_id": chat.id,
+        "title":   chat.title or channel,
+        "username": f"@{chat.username}" if chat.username else str(chat.id),
+        "reason":  "OK"
+    }
+
+
+# ── ONBOARDING CONVERSATION ────────────────────────────────────────────────────
+
+async def cmd_become_creator(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Entry point: /becomecreator or button → start onboarding."""
+    uid  = update.effective_user.id
+    user = update.effective_user
+
+    # Already a creator → go to dashboard
+    if can_use_creator_features(uid):
+        ensure_admin_creator(uid, user.username or "", user.first_name or "")
+        reply_fn = (update.callback_query.edit_message_text
+                    if update.callback_query
+                    else update.message.reply_text)
+        await reply_fn(
+            "🎨 You already have creator access!\nOpening your dashboard…",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=kb_creator(),
+        )
+        return ConversationHandler.END
+
+    bot_me = await context.bot.get_me()
+    text   = (
+        f"🚀 *Creator Onboarding — Step 1 / 2*\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"You can protect your Telegram content using\n"
+        f"*unlock campaigns* — users must join your\n"
+        f"channel before accessing your content.\n\n"
+        f"*Before you continue:*\n"
+        f"1️⃣ Add @{bot_me.username} as *Admin* in your channel\n"
+        f"2️⃣ Grant: *Post Messages* + *Invite Users* permissions\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"✏️ Now send your channel username:\n"
+        f"Example: `@yourchannelname`"
+    )
+    kb = kb_onboard_cancel()
+
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+    else:
+        await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+
+    context.user_data.pop("admin_action", None)
+    context.user_data["onboarding"] = True
+    return ONBOARD_CHANNEL
+
+
+async def onboard_recv_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Step 2: receive channel username, verify, register creator."""
+    uid  = update.effective_user.id
+    user = update.effective_user
+    msg  = update.message
+
+    raw  = msg.text.strip() if msg.text else ""
+    if not raw:
+        await msg.reply_text("❌ Please send a valid channel username (e.g. `@mychannel`)",
+                             parse_mode=ParseMode.MARKDOWN)
+        return ONBOARD_CHANNEL
+
+    # Normalize: ensure starts with @
+    channel = raw if raw.startswith("@") or raw.startswith("-") else f"@{raw}"
+
+    # Show "verifying…" message
+    progress = await msg.reply_text(
+        f"🔍 Verifying `{channel}`…",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+    result = await verify_channel_and_permissions(context.bot, channel)
+
+    if not result["ok"]:
+        await progress.edit_text(
+            f"*Verification Failed*\n\n{result['reason']}\n\n"
+            f"Fix the issue and send the channel username again:",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=kb_onboard_cancel(),
+        )
+        return ONBOARD_CHANNEL  # Stay in state, let them retry
+
+    # ── All checks passed — register as creator ────────────────────────────────
+    chat_id    = result["chat_id"]
+    chan_title  = result["title"]
+    chan_uname  = result["username"]
+    trial_days = db.settings.get("trial_days", 90)
+
+    # Create creator record (self-service — no admin approval needed)
+    if db.get_creator(uid):
+        # Already exists (e.g. re-onboarding) — add channel if not present
+        cr = db.get_creator(uid)
+        if chan_uname not in cr.get("channels", []):
+            cr.setdefault("channels", []).append(chan_uname)
+        cr["channel_id"] = str(chat_id)
+        db.save(force=True)
+    else:
+        db.creators[str(uid)] = {
+            "username":    user.username or "",
+            "name":        user.first_name or f"Creator_{uid}",
+            "trial_start": datetime.now().isoformat(),
+            "trial_days":  trial_days,
+            "channels":    [chan_uname],
+            "channel_id":  str(chat_id),
+            "materials":   [],
+            "campaigns":   [],
+            "joined_at":   datetime.now().isoformat(),
+            "self_onboarded": True,
+        }
+        db.save(force=True)
+        logger.info("🎨 New creator self-onboarded: %s (%d)", user.first_name, uid)
+
+    # Update channel in channels_map for quick lookup
+    db._data.setdefault("channels_map", {})[str(chat_id)] = str(uid)
+    db.save(force=True)
+
+    await progress.edit_text(
+        f"✅ *Channel Connected Successfully!*\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📢 Channel: *{chan_title}* (`{chan_uname}`)\n"
+        f"🆔 Your ID: `{uid}`\n\n"
+        f"🚀 *Creator Panel Activated!*\n\n"
+        f"You can now create unlock campaigns.\n"
+        f"Use *➕ Create Campaign* to get started!",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb_creator(),
+    )
+
+    context.user_data.pop("onboarding", None)
+    return ConversationHandler.END
+
+
+async def onboard_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cancel onboarding at any point."""
+    context.user_data.pop("onboarding", None)
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text(
+            "❌ Onboarding cancelled. You can tap *🚀 Become Creator* anytime.",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=kb_user(),
+        )
+    else:
+        await update.message.reply_text(
+            "❌ Onboarding cancelled.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Home", callback_data="u_back")]]),
+        )
+    return ConversationHandler.END
+
+
+# ── CREATE CAMPAIGN CONVERSATION ───────────────────────────────────────────────
+
+async def cmd_createcampaign(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Entry: /createcampaign — starts simple URL-based campaign creation."""
+    uid  = update.effective_user.id
+    user = update.effective_user
+
+    if not can_use_creator_features(uid):
+        text = (
+            "❌ *Creator access required*\n\n"
+            "Tap *🚀 Become Creator* first to create campaigns."
+        )
+        if update.callback_query:
+            await update.callback_query.answer(text, show_alert=True)
+        else:
+            await update.message.reply_text(
+                text, parse_mode=ParseMode.MARKDOWN,
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🚀 Become Creator", callback_data="u_become_creator")]
+                ]),
+            )
+        return ConversationHandler.END
+
+    if not creator_is_active(uid):
+        await update.message.reply_text("⏰ Subscription expired! Use /renewpanel")
+        return ConversationHandler.END
+
+    if is_admin(uid):
+        ensure_admin_creator(uid, user.username or "", user.first_name or "")
+
+    context.user_data.pop("admin_action", None)
+    context.user_data["campaign_draft"] = {}
+
+    text = (
+        "➕ *Create Campaign — Step 1 / 2*\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "Send the *unlock content link* — this is what users\n"
+        "receive after joining your channel(s).\n\n"
+        "Supported: Drive, Telegram post, website, PDF, any URL\n\n"
+        "Example:\n`https://t.me/yourchannel/42`"
+    )
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="createcamp_cancel")]])
+
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+    else:
+        await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+
+    return CREATECAMP_LINK
+
+
+async def createcamp_recv_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Step 2 of createcampaign: receive unlock link."""
+    raw = (update.message.text or "").strip()
+    if not raw.startswith("http"):
+        await update.message.reply_text(
+            "❌ Please send a valid URL starting with `http://` or `https://`\n\n"
+            "Example: `https://t.me/yourchannel/42`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return CREATECAMP_LINK
+
+    context.user_data["campaign_draft"]["unlock_link"] = raw
+
+    await update.message.reply_text(
+        "➕ *Create Campaign — Step 2 / 2*\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "Send the channel username(s) users *must join* to unlock.\n"
+        "Separate multiple channels with spaces.\n\n"
+        "Example:\n`@channel1 @channel2`\n\n"
+        "⚠️ Bot must be *admin* in each channel listed!",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("❌ Cancel", callback_data="createcamp_cancel")]
+        ]),
+    )
+    return CREATECAMP_CHANNELS
+
+
+async def createcamp_recv_channels(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Step 3: receive required channels, validate, save campaign."""
+    uid   = update.effective_user.id
+    raw   = (update.message.text or "").strip()
+    parts = raw.split()
+    channels = [p if p.startswith("@") or p.startswith("-") else f"@{p}" for p in parts if p]
+
+    if not channels:
+        await update.message.reply_text(
+            "❌ Send at least one channel username. Example: `@mychannel`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return CREATECAMP_CHANNELS
+
+    # Validate bot is admin in each channel
+    progress = await update.message.reply_text(
+        f"🔍 Verifying {len(channels)} channel(s)…",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+    valid, invalid = [], []
+    for ch in channels:
+        r = await verify_channel_and_permissions(context.bot, ch)
+        if r["ok"]:
+            valid.append(ch)
+        else:
+            invalid.append(ch)
+
+    if not valid:
+        await progress.edit_text(
+            "❌ Bot is not admin in *any* of those channels.\n\n"
+            "Add bot as admin first, then send the channel(s) again.",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ Cancel", callback_data="createcamp_cancel")]
+            ]),
+        )
+        return CREATECAMP_CHANNELS
+
+    # ── Save campaign ──────────────────────────────────────────────────────────
+    draft   = context.user_data.get("campaign_draft", {})
+    link    = draft.get("unlock_link", "")
+
+    # Generate unique campaign ID
+    camp_id = str(uuid.uuid4())[:8].upper()
+    while camp_id in db.campaigns:
+        camp_id = str(uuid.uuid4())[:8].upper()
+
+    db.campaigns[camp_id] = {
+        "creator_id":         str(uid),
+        "required_channels":  valid,
+        "channels":           valid,           # keep compatibility with existing verify flow
+        "unlock_link":        link,
+        "material_id":        None,            # URL-based, no material
+        "referral_required":  0,
+        "is_active":          True,
+        "campaign_type":      "url_unlock",
+        "created_at":         datetime.now().isoformat(),
+    }
+
+    # Link campaign to creator record
+    cr = db.get_creator(uid)
+    if cr is None and is_admin(uid):
+        cr = ensure_admin_creator(uid)
+    if cr:
+        cr.setdefault("campaigns", []).append(camp_id)
+    db.save(force=True)
+
+    db.track("campaign_clicks", camp_id)  # initialise counter
+
+    bot_me     = await context.bot.get_me()
+    deep_link  = f"https://t.me/{bot_me.username}?start=unlock_{camp_id}"
+    warn_skipped = ""
+    if invalid:
+        warn_skipped = f"\n⚠️ Skipped (bot not admin): {', '.join(invalid)}"
+
+    await progress.edit_text(
+        f"✅ *Campaign Created Successfully!*\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🆔 Campaign ID: `{camp_id}`\n"
+        f"📢 Channels: {', '.join(valid)}\n"
+        f"🔗 Unlock Link: `{link}`{warn_skipped}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📣 *Share this unlock link:*\n"
+        f"`{deep_link}`\n\n"
+        f"Users tap this → join your channel → get the link! 🎉",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🌐 Open Link",      url=deep_link)],
+            [InlineKeyboardButton("🎯 My Campaigns",   callback_data="c_campaigns"),
+             InlineKeyboardButton("📊 Dashboard",     callback_data="c_dash")],
+        ]),
+    )
+
+    context.user_data.pop("campaign_draft", None)
+    return ConversationHandler.END
+
+
+async def createcamp_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.pop("campaign_draft", None)
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text(
+            "❌ Campaign creation cancelled.",
+            reply_markup=kb_creator(),
+        )
+    else:
+        await update.message.reply_text("❌ Campaign creation cancelled.",
+                                        reply_markup=InlineKeyboardMarkup([
+                                            [InlineKeyboardButton("🏠 Creator Panel", callback_data="c_dash")]
+                                        ]))
+    return ConversationHandler.END
+
+
+# ── FIX: Handle unlock_<id> deep links in /start ──────────────────────────────
+
+_ORIG_handle_campaign = _handle_campaign  # preserve original
+
+
+async def _handle_campaign_extended(update: Update, context: ContextTypes.DEFAULT_TYPE, campaign_id: str):
+    """
+    Extended campaign handler that supports both:
+    - Original material-based campaigns (file delivery)
+    - New URL-based campaigns (unlock_link delivery)
+    """
+    user = update.effective_user
+    uid  = user.id
+
+    campaign = db.campaigns.get(campaign_id)
+    if not campaign or not campaign.get("is_active"):
+        await update.message.reply_text(
+            "❌ This campaign link is not active or doesn't exist."
+        )
+        return
+
+    db.track("campaign_clicks", campaign_id)
+
+    channels   = campaign.get("channels", campaign.get("required_channels", []))
+    not_joined = await check_channel_membership(context.bot, uid, channels)
+
+    if not_joined:
+        buttons = [
+            [InlineKeyboardButton(f"📢 Join Channel {i+1}",
+                                  url=f"https://t.me/{c.lstrip('@')}")]
+            for i, c in enumerate(not_joined)
+        ]
+        buttons.append(
+            [InlineKeyboardButton("✅ I've Joined — Verify",
+                                  callback_data=f"verify_{campaign_id}")]
+        )
+        await update.message.reply_text(
+            f"🔐 *Content Locked*\n\n"
+            f"Join the channel(s) below to unlock:\n\n"
+            + "\n".join(f"• `{c}`" for c in not_joined)
+            + "\n\nAfter joining, tap *✅ Verify*",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+        return
+
+    # Referral check
+    ref_req   = campaign.get("referral_required", 0)
+    u         = db.get_or_create_user(uid)
+    user_refs = u.get("referral_count", 0)
+
+    if ref_req > 0 and user_refs < ref_req:
+        bot_me   = await context.bot.get_me()
+        ref_link = f"https://t.me/{bot_me.username}?start=ref_{uid}"
+        needed   = ref_req - user_refs
+        await update.message.reply_text(
+            f"👥 *{needed} more referral(s) needed!*\n\n"
+            f"Your link:\n`{ref_link}`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    # ── Deliver ────────────────────────────────────────────────────────────────
+    unlock_link = campaign.get("unlock_link")
+    if unlock_link:
+        # URL-based campaign
+        await update.message.reply_text(
+            f"🎉 *Unlocked! Here's your content:*\n\n"
+            f"🔗 {unlock_link}",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🌐 Open Content", url=unlock_link)]
+            ]),
+        )
+    else:
+        # Material-based (original flow)
+        await deliver_material(context.bot, update.message.chat_id, campaign)
+
+    db.track("unlock_success", campaign_id)
+    u["unlocked_campaigns"] = list(set(u.get("unlocked_campaigns", []) + [campaign_id]))
+    db.save()
+
+
+# ── PATCH /start to handle unlock_ prefix ─────────────────────────────────────
+
+async def cmd_start_patched(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Patched /start that intercepts unlock_<id> deep links before
+    calling original cmd_start.
+    """
+    args = context.args or []
+    if args:
+        arg = args[0]
+        # New format: unlock_CAMPID
+        if arg.startswith("unlock_"):
+            camp_id = arg[7:].upper()
+            db.get_or_create_user(
+                update.effective_user.id,
+                username=update.effective_user.username or "",
+                first_name=update.effective_user.first_name or "",
+            )
+            return await _handle_campaign_extended(update, context, camp_id)
+        # Original format: CAMPID (8 chars upper)
+        if len(arg) == 8 and arg.isupper():
+            db.get_or_create_user(
+                update.effective_user.id,
+                username=update.effective_user.username or "",
+                first_name=update.effective_user.first_name or "",
+            )
+            return await _handle_campaign_extended(update, context, arg)
+    # Fall through to original
+    return await cmd_start(update, context)
+
+
+# ── VERIFY callback extended ───────────────────────────────────────────────────
+
+async def verify_callback_extended(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Extended verify callback that supports both url-based and material campaigns.
+    Registered BEFORE callback_router so it intercepts verify_ patterns.
+    """
+    query      = update.callback_query
+    await query.answer()
+    data       = query.data
+    campaign_id = data[7:]
+    uid        = query.from_user.id
+
+    campaign = db.campaigns.get(campaign_id)
+    if not campaign:
+        await query.edit_message_text("❌ Campaign not found.")
+        return
+
+    channels   = campaign.get("channels", campaign.get("required_channels", []))
+    not_joined = await check_channel_membership(context.bot, uid, channels)
+
+    if not_joined:
+        buttons = [
+            [InlineKeyboardButton(f"📢 Join Channel {i+1}",
+                                  url=f"https://t.me/{c.lstrip('@')}")]
+            for i, c in enumerate(not_joined)
+        ]
+        buttons.append([InlineKeyboardButton("✅ Verify Again",
+                                             callback_data=f"verify_{campaign_id}")])
+        await query.edit_message_text(
+            "❌ *Still not joined!*\n\nMissing:\n"
+            + "\n".join(f"• `{c}`" for c in not_joined),
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+        return
+
+    db.track("verification_success", campaign_id)
+
+    ref_req   = campaign.get("referral_required", 0)
+    u         = db.get_or_create_user(uid)
+    user_refs = u.get("referral_count", 0)
+
+    if ref_req > 0 and user_refs < ref_req:
+        bot_me   = await context.bot.get_me()
+        ref_link = f"https://t.me/{bot_me.username}?start=ref_{uid}"
+        needed   = ref_req - user_refs
+        await query.edit_message_text(
+            f"👥 *{needed} more referral(s) needed!*\n\n`{ref_link}`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    await query.edit_message_text("🎁 *Unlocking…*", parse_mode=ParseMode.MARKDOWN)
+
+    unlock_link = campaign.get("unlock_link")
+    if unlock_link:
+        await context.bot.send_message(
+            query.message.chat_id,
+            f"🎉 *Unlocked! Here's your content:*\n\n🔗 {unlock_link}",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🌐 Open Content", url=unlock_link)]
+            ]),
+        )
+    else:
+        await deliver_material(context.bot, query.message.chat_id, campaign)
+
+    db.track("unlock_success", campaign_id)
+    u["unlocked_campaigns"] = list(set(u.get("unlocked_campaigns", []) + [campaign_id]))
+    db.save()
+
+
+# ── CREATOR DASHBOARD command ──────────────────────────────────────────────────
+
+async def cmd_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/dashboard — show creator dashboard with stats."""
+    uid  = update.effective_user.id
+    user = update.effective_user
+
+    if not can_use_creator_features(uid):
+        await update.message.reply_text(
+            "❌ *Creator access required*\n\nTap 🚀 Become Creator first.",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🚀 Become Creator", callback_data="u_become_creator")]
+            ]),
+        )
+        return
+
+    if is_admin(uid):
+        ensure_admin_creator(uid, user.username or "", user.first_name or "")
+
+    cr    = db.get_creator(uid)
+    camps = cr.get("campaigns", []) if cr else []
+    chans = cr.get("channels",   []) if cr else []
+
+    total_clicks  = sum(db.analytics.get("campaign_clicks",       {}).get(c, 0) for c in camps)
+    total_verif   = sum(db.analytics.get("verification_success",  {}).get(c, 0) for c in camps)
+    total_unlocks = sum(db.analytics.get("unlock_success",        {}).get(c, 0) for c in camps)
+
+    # Unique users who unlocked this creator's campaigns
+    unlock_users = set()
+    for uid_str, u_data in db.users.items():
+        if any(c in set(camps) for c in u_data.get("unlocked_campaigns", [])):
+            unlock_users.add(uid_str)
+
+    chan_status = (
+        f"✅ {', '.join(chans[:3])}" if chans
+        else "❌ Not connected — use /becomecreator"
+    )
+    days  = db.creator_days_left(uid)
+    badge = "♾ No expiry" if is_admin(uid) else f"⏳ {days} days left"
+
+    await update.message.reply_text(
+        f"📊 *Creator Dashboard*\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 *{cr.get('name', user.first_name) if cr else user.first_name}*\n"
+        f"🔗 Channel: {chan_status}\n"
+        f"⏳ Status: {badge}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🎯 Campaigns:       `{len(camps)}`\n"
+        f"👆 Total Clicks:    `{total_clicks}`\n"
+        f"✅ Verified:        `{total_verif}`\n"
+        f"🔓 Total Unlocks:   `{total_unlocks}`\n"
+        f"👥 Unique Unlockers:`{len(unlock_users)}`\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🕐 `{now_str()}`",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("➕ Create Campaign", callback_data="c_setup"),
+             InlineKeyboardButton("🎯 My Campaigns",   callback_data="c_campaigns")],
+            [InlineKeyboardButton("📣 Broadcast",      callback_data="c_broadcast"),
+             InlineKeyboardButton("🔗 My Links",       callback_data="c_links")],
+        ]),
+    )
+
+
+# ── BROADCAST USERS command ────────────────────────────────────────────────────
+
+async def cmd_broadcastusers(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/broadcastusers — creator sends message to all their unlockers."""
+    uid = update.effective_user.id
+
+    if not can_use_creator_features(uid):
+        await update.message.reply_text(
+            "❌ *Creator access required*\n\nTap 🚀 Become Creator first.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    if not creator_is_active(uid):
+        await update.message.reply_text("⏰ Subscription expired! Use /renewpanel")
+        return
+
+    if is_admin(uid):
+        ensure_admin_creator(uid)
+
+    cr      = db.get_creator(uid)
+    camp_ids = set(cr.get("campaigns", []) if cr else [])
+
+    # Find users who have unlocked any of this creator's campaigns
+    target_ids = [
+        int(u_id)
+        for u_id, u_data in db.users.items()
+        if any(c in camp_ids for c in u_data.get("unlocked_campaigns", []))
+    ]
+
+    if not target_ids:
+        await update.message.reply_text(
+            "📭 *No audience yet!*\n\n"
+            "Nobody has unlocked your content yet.\n"
+            "Share your campaign links to grow your audience!",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔗 My Links", callback_data="c_links")]
+            ]),
+        )
+        return
+
+    context.user_data["cbcast_step"]       = "content"
+    context.user_data["cbcast_targets"]    = target_ids
+    await update.message.reply_text(
+        f"📣 *Broadcast to Your Audience*\n\n"
+        f"👥 Audience size: *{len(target_ids)}* users\n\n"
+        f"Send your message now.\n"
+        f"Supports: text, photo, video, document (+ caption)",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("❌ Cancel", callback_data="c_dash")]
+        ]),
+    )
+
+
+# ── AUTO-DETECT bot added to channel ──────────────────────────────────────────
+
+async def handle_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Fires when the bot's admin status changes in any chat.
+    If bot becomes admin in a channel, try to find the owner and notify them.
+    """
+    my_member = update.my_chat_member
+    if not my_member:
+        return
+
+    new_status = my_member.new_chat_member.status
+    chat       = my_member.chat
+    from_user  = my_member.from_user  # who made the change
+
+    # Only care about channels (not groups)
+    if chat.type not in ("channel", "supergroup"):
+        return
+
+    if new_status not in ("administrator", "creator"):
+        return  # bot was removed or demoted — ignore
+
+    # Bot just became admin — notify the user who added it
+    if not from_user:
+        return
+
+    uid = from_user.id
+    logger.info("🔔 Bot added as admin in %s by %d", chat.title, uid)
+
+    chan_uname = f"@{chat.username}" if chat.username else str(chat.id)
+
+    try:
+        await context.bot.send_message(
+            uid,
+            f"🎉 *Channel Detected!*\n\n"
+            f"Bot was added as admin in:\n"
+            f"📢 *{chat.title}* (`{chan_uname}`)\n\n"
+            f"You can now:\n"
+            f"• Create unlock campaigns for this channel\n"
+            f"• Use /createcampaign to get started\n\n"
+            f"Or tap the button below 👇",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("➕ Create Campaign", callback_data="c_setup")],
+                [InlineKeyboardButton("🚀 Connect Channel", callback_data="onboard_start")],
+            ]),
+        )
+    except Exception as e:
+        logger.warning("Could not notify user %d about channel: %s", uid, e)
+
+    # Auto-register if they're already in creators
+    if can_use_creator_features(uid):
+        cr = db.get_creator(uid)
+        if cr and chan_uname not in cr.get("channels", []):
+            cr.setdefault("channels", []).append(chan_uname)
+            cr["channel_id"] = str(chat.id)
+            db._data.setdefault("channels_map", {})[str(chat.id)] = str(uid)
+            db.save(force=True)
+
+
+# ── ONBOARDING TEXT MESSAGE handler (catch channel input from callback flow) ───
+
+async def onboard_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Catches channel username messages when user started onboarding
+    via the inline button (not /becomecreator command) — outside ConversationHandler.
+    """
+    uid = update.effective_user.id
+    if not context.user_data.get("onboard_from_callback"):
+        return  # Not in callback-triggered onboarding — ignore
+
+    raw     = (update.message.text or "").strip()
+    channel = raw if raw.startswith("@") or raw.startswith("-") else f"@{raw}"
+
+    progress = await update.message.reply_text(
+        f"🔍 Verifying `{channel}`…", parse_mode=ParseMode.MARKDOWN
+    )
+    result = await verify_channel_and_permissions(context.bot, channel)
+
+    if not result["ok"]:
+        await progress.edit_text(
+            f"*Verification Failed*\n\n{result['reason']}\n\nSend channel username again:",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=kb_onboard_cancel(),
+        )
+        return  # Stay waiting
+
+    # Register creator
+    chan_uname  = result["username"]
+    chat_id     = result["chat_id"]
+    chan_title  = result["title"]
+    user        = update.effective_user
+    trial_days  = db.settings.get("trial_days", 90)
+
+    if db.get_creator(uid):
+        cr = db.get_creator(uid)
+        if chan_uname not in cr.get("channels", []):
+            cr.setdefault("channels", []).append(chan_uname)
+        cr["channel_id"] = str(chat_id)
+    else:
+        db.creators[str(uid)] = {
+            "username":       user.username or "",
+            "name":           user.first_name or f"Creator_{uid}",
+            "trial_start":    datetime.now().isoformat(),
+            "trial_days":     trial_days,
+            "channels":       [chan_uname],
+            "channel_id":     str(chat_id),
+            "materials":      [],
+            "campaigns":      [],
+            "joined_at":      datetime.now().isoformat(),
+            "self_onboarded": True,
+        }
+
+    db._data.setdefault("channels_map", {})[str(chat_id)] = str(uid)
+    db.save(force=True)
+    context.user_data.pop("onboard_from_callback", None)
+
+    await progress.edit_text(
+        f"✅ *Channel Connected Successfully!*\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📢 *{chan_title}* (`{chan_uname}`)\n\n"
+        f"🚀 *Creator Panel Activated!*\n"
+        f"Use *➕ Create Campaign* to get started!",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb_creator(),
+    )
+
