@@ -3214,10 +3214,6 @@ def main():
     app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
 
 
-if __name__ == "__main__":
-    main()
-
-
 # ═══════════════════════════════════════════════════════════════════════════════
 #  CREATOR ONBOARDING SYSTEM
 #  Self-service: any user can become a creator by connecting their channel
@@ -4076,3 +4072,7 @@ async def onboard_text_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         reply_markup=kb_creator(),
     )
 
+
+
+if __name__ == "__main__":
+    main()
