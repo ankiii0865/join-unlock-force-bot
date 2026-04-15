@@ -1653,6 +1653,8 @@ async def _execute_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE,
 # ─────────────────────────────────────────────────────────────────
 
 async def general_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user is None:
+        return
     uid = update.effective_user.id
     msg = update.message
 
