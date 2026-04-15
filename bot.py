@@ -782,6 +782,16 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     uid  = query.from_user.id
 
+    try:
+        await _callback_router_inner(update, context, query, data, uid)
+    except BadRequest as e:
+        if "message is not modified" in str(e).lower():
+            logger.debug("Skipped edit — message content unchanged: %s", e)
+        else:
+            raise
+
+
+async def _callback_router_inner(update: Update, context: ContextTypes.DEFAULT_TYPE, query, data: str, uid: int):
     # ══════════════════════════════════════════
     #  VERIFY CALLBACK
     # ══════════════════════════════════════════
@@ -1653,6 +1663,10 @@ async def _execute_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE,
 # ─────────────────────────────────────────────────────────────────
 
 async def general_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user is None:
+        return
+    if update.message is None:
+        return
     uid = update.effective_user.id
     msg = update.message
 
