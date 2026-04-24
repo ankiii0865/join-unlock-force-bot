@@ -38,7 +38,7 @@ from telegram import (
     Update,
 )
 from telegram.constants import ParseMode
-from telegram.error import BadRequest, Forbidden, TelegramError
+from telegram.error import BadRequest, Forbidden, NetworkError, TelegramError
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -2930,6 +2930,15 @@ async def cmd_addadmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ERROR + UNKNOWN HANDLERS
 # ─────────────────────────────────────────────────────────────────────────────
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    # NetworkErrors are transient — log at WARNING level and skip admin DM spam
+    if isinstance(context.error, NetworkError):
+        logger.warning(
+            "Transient network error (handled by retry loop): %s: %s",
+            type(context.error).__name__,
+            context.error,
+        )
+        return
+
     logger.error("Unhandled error: %s", context.error, exc_info=context.error)
     for sa_id in SUPER_ADMIN_IDS:
         try:
@@ -3012,145 +3021,197 @@ async def post_init(app: Application):
     logger.info("🚀 ForceHub Bot started — %s", now_str())
 
 
-def main():
+async def main():
     if not BOT_TOKEN:
         logger.critical("❌ BOT_TOKEN not set! Check .env")
         return
 
-    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
+    # ── Retry / backoff constants ─────────────────────────────────────────────
+    MAX_RETRIES      = 10
+    BACKOFF_BASE     = 5    # seconds — first retry delay
+    BACKOFF_MAX      = 60   # seconds — ceiling for exponential growth
+    attempt          = 0
 
-    # ── Onboarding conversation ───────────────────────────────────────────────
-    onboard_conv = ConversationHandler(
-        entry_points=[
-            CommandHandler("becomecreator", onboard_entry),
-            CallbackQueryHandler(onboard_entry, pattern=r"^onboard_start$"),
-        ],
-        states={
-            ONBOARD_CHANNEL: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, onboard_recv_channel)
+    while attempt <= MAX_RETRIES:
+        app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
+
+        # ── Onboarding conversation ───────────────────────────────────────────
+        onboard_conv = ConversationHandler(
+            entry_points=[
+                CommandHandler("becomecreator", onboard_entry),
+                CallbackQueryHandler(onboard_entry, pattern=r"^onboard_start$"),
             ],
-        },
-        fallbacks=[
-            CommandHandler("cancel", onboard_cancel),
-            CallbackQueryHandler(onboard_cancel, pattern=r"^onboard_cancel$"),
-        ],
-        per_message=False,
-        allow_reentry=True,
-    )
-
-    # ── Create campaign conversation ──────────────────────────────────────────
-    createcamp_conv = ConversationHandler(
-        entry_points=[
-            CommandHandler("createcampaign", createcamp_entry),
-            CallbackQueryHandler(createcamp_entry, pattern=r"^c_new$"),
-        ],
-        states={
-            CAMP_LINK:     [MessageHandler(filters.TEXT & ~filters.COMMAND, createcamp_recv_link)],
-            CAMP_CHANNELS: [MessageHandler(filters.TEXT & ~filters.COMMAND, createcamp_recv_channels)],
-        },
-        fallbacks=[
-            CommandHandler("cancel",         createcamp_cancel),
-            CallbackQueryHandler(createcamp_cancel, pattern=r"^createcamp_cancel$"),
-        ],
-        per_message=False,
-        allow_reentry=True,
-    )
-
-    # ── Advanced setup conversation ───────────────────────────────────────────
-    setup_conv = ConversationHandler(
-        entry_points=[
-            CommandHandler("setup", setup_entry),
-            CallbackQueryHandler(setup_entry, pattern=r"^c_adv_setup$"),
-        ],
-        states={
-            SETUP_CHANNEL:    [MessageHandler(filters.TEXT & ~filters.COMMAND, setup_recv_channels)],
-            SETUP_MAT_TYPE:   [CallbackQueryHandler(setup_recv_mtype, pattern=r"^mtype_")],
-            SETUP_MAT_TITLE:  [MessageHandler(filters.TEXT & ~filters.COMMAND, setup_recv_title)],
-            SETUP_MAT_CONTENT:[
-                MessageHandler(
-                    (filters.TEXT | filters.PHOTO | filters.VIDEO | filters.Document.ALL)
-                    & ~filters.COMMAND,
-                    setup_recv_content,
-                )
+            states={
+                ONBOARD_CHANNEL: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, onboard_recv_channel)
+                ],
+            },
+            fallbacks=[
+                CommandHandler("cancel", onboard_cancel),
+                CallbackQueryHandler(onboard_cancel, pattern=r"^onboard_cancel$"),
             ],
-            SETUP_REF_COUNT:  [MessageHandler(filters.TEXT & ~filters.COMMAND, setup_recv_referral)],
-        },
-        fallbacks=[
-            CommandHandler("cancel",       setup_cancel),
-            CallbackQueryHandler(setup_cancel, pattern=r"^setup_cancel$"),
-        ],
-        per_message=False,
-        allow_reentry=True,
-    )
-
-    # ── Register all handlers (order is critical) ─────────────────────────────
-    # 1. ConversationHandlers first
-    app.add_handler(onboard_conv)
-    app.add_handler(createcamp_conv)
-    app.add_handler(setup_conv)
-
-    # 2. Core commands
-    app.add_handler(CommandHandler("start",   cmd_start))
-    app.add_handler(CommandHandler("id",      cmd_id))
-    app.add_handler(CommandHandler("help",    cmd_help))
-
-    # 3. Creator commands
-    app.add_handler(CommandHandler("creator",         cmd_creator))
-    app.add_handler(CommandHandler("dashboard",       cmd_dashboard))
-    app.add_handler(CommandHandler("mycampaigns",     cmd_mycampaigns))
-    app.add_handler(CommandHandler("mystats",         cmd_mystats))
-    app.add_handler(CommandHandler("materials",       cmd_materials))
-    app.add_handler(CommandHandler("channels",        cmd_channels))
-    app.add_handler(CommandHandler("togglecampaign",  cmd_togglecampaign))
-
-    # 4. Admin commands
-    app.add_handler(CommandHandler("admin",          cmd_admin))
-    app.add_handler(CommandHandler("broadcast",      cmd_broadcast))
-    app.add_handler(CommandHandler("globalstats",    cmd_globalstats))
-    app.add_handler(CommandHandler("addcreator",     cmd_addcreator))
-    app.add_handler(CommandHandler("removecreator",  cmd_removecreator))
-    app.add_handler(CommandHandler("viewuser",       cmd_viewuser))
-    app.add_handler(CommandHandler("viewcreator",    cmd_viewcreator))
-    app.add_handler(CommandHandler("listcreators",   cmd_listcreators))
-    app.add_handler(CommandHandler("listusers",      cmd_listusers))
-    app.add_handler(CommandHandler("dm",             cmd_dm))
-    app.add_handler(CommandHandler("delcampaign",    cmd_delcampaign))
-    app.add_handler(CommandHandler("setprice",       cmd_setprice))
-    app.add_handler(CommandHandler("setupi",         cmd_setupi))
-    app.add_handler(CommandHandler("addadmin",       cmd_addadmin))
-    app.add_handler(CommandHandler("export",         cmd_export))
-
-    # 5. Verify callback BEFORE generic routers
-    app.add_handler(CallbackQueryHandler(cb_verify,  pattern=r"^verify_"))
-
-    # 6. Section callback routers (pattern-scoped for clarity)
-    app.add_handler(CallbackQueryHandler(cb_user,    pattern=r"^u_"))
-    app.add_handler(CallbackQueryHandler(cb_creator, pattern=r"^c_"))
-    app.add_handler(CallbackQueryHandler(cb_admin,   pattern=r"^(a_|bcast_)"))
-
-    # 7. Channel detection
-    app.add_handler(
-        ChatMemberHandler(handle_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER)
-    )
-
-    # 8. General message handler
-    app.add_handler(
-        MessageHandler(
-            (filters.TEXT | filters.PHOTO | filters.VIDEO | filters.Document.ALL)
-            & ~filters.COMMAND,
-            general_message_handler,
+            per_message=False,
+            allow_reentry=True,
         )
-    )
 
-    # 9. Unknown commands — must be last
-    app.add_handler(MessageHandler(filters.COMMAND, cmd_unknown))
+        # ── Create campaign conversation ──────────────────────────────────────
+        createcamp_conv = ConversationHandler(
+            entry_points=[
+                CommandHandler("createcampaign", createcamp_entry),
+                CallbackQueryHandler(createcamp_entry, pattern=r"^c_new$"),
+            ],
+            states={
+                CAMP_LINK:     [MessageHandler(filters.TEXT & ~filters.COMMAND, createcamp_recv_link)],
+                CAMP_CHANNELS: [MessageHandler(filters.TEXT & ~filters.COMMAND, createcamp_recv_channels)],
+            },
+            fallbacks=[
+                CommandHandler("cancel",         createcamp_cancel),
+                CallbackQueryHandler(createcamp_cancel, pattern=r"^createcamp_cancel$"),
+            ],
+            per_message=False,
+            allow_reentry=True,
+        )
 
-    # 10. Global error handler
-    app.add_error_handler(error_handler)
+        # ── Advanced setup conversation ───────────────────────────────────────
+        setup_conv = ConversationHandler(
+            entry_points=[
+                CommandHandler("setup", setup_entry),
+                CallbackQueryHandler(setup_entry, pattern=r"^c_adv_setup$"),
+            ],
+            states={
+                SETUP_CHANNEL:    [MessageHandler(filters.TEXT & ~filters.COMMAND, setup_recv_channels)],
+                SETUP_MAT_TYPE:   [CallbackQueryHandler(setup_recv_mtype, pattern=r"^mtype_")],
+                SETUP_MAT_TITLE:  [MessageHandler(filters.TEXT & ~filters.COMMAND, setup_recv_title)],
+                SETUP_MAT_CONTENT:[
+                    MessageHandler(
+                        (filters.TEXT | filters.PHOTO | filters.VIDEO | filters.Document.ALL)
+                        & ~filters.COMMAND,
+                        setup_recv_content,
+                    )
+                ],
+                SETUP_REF_COUNT:  [MessageHandler(filters.TEXT & ~filters.COMMAND, setup_recv_referral)],
+            },
+            fallbacks=[
+                CommandHandler("cancel",       setup_cancel),
+                CallbackQueryHandler(setup_cancel, pattern=r"^setup_cancel$"),
+            ],
+            per_message=False,
+            allow_reentry=True,
+        )
 
-    logger.info("📡 Polling started…")
-    app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
+        # ── Register all handlers (order is critical) ─────────────────────────
+        # 1. ConversationHandlers first
+        app.add_handler(onboard_conv)
+        app.add_handler(createcamp_conv)
+        app.add_handler(setup_conv)
+
+        # 2. Core commands
+        app.add_handler(CommandHandler("start",   cmd_start))
+        app.add_handler(CommandHandler("id",      cmd_id))
+        app.add_handler(CommandHandler("help",    cmd_help))
+
+        # 3. Creator commands
+        app.add_handler(CommandHandler("creator",         cmd_creator))
+        app.add_handler(CommandHandler("dashboard",       cmd_dashboard))
+        app.add_handler(CommandHandler("mycampaigns",     cmd_mycampaigns))
+        app.add_handler(CommandHandler("mystats",         cmd_mystats))
+        app.add_handler(CommandHandler("materials",       cmd_materials))
+        app.add_handler(CommandHandler("channels",        cmd_channels))
+        app.add_handler(CommandHandler("togglecampaign",  cmd_togglecampaign))
+
+        # 4. Admin commands
+        app.add_handler(CommandHandler("admin",          cmd_admin))
+        app.add_handler(CommandHandler("broadcast",      cmd_broadcast))
+        app.add_handler(CommandHandler("globalstats",    cmd_globalstats))
+        app.add_handler(CommandHandler("addcreator",     cmd_addcreator))
+        app.add_handler(CommandHandler("removecreator",  cmd_removecreator))
+        app.add_handler(CommandHandler("viewuser",       cmd_viewuser))
+        app.add_handler(CommandHandler("viewcreator",    cmd_viewcreator))
+        app.add_handler(CommandHandler("listcreators",   cmd_listcreators))
+        app.add_handler(CommandHandler("listusers",      cmd_listusers))
+        app.add_handler(CommandHandler("dm",             cmd_dm))
+        app.add_handler(CommandHandler("delcampaign",    cmd_delcampaign))
+        app.add_handler(CommandHandler("setprice",       cmd_setprice))
+        app.add_handler(CommandHandler("setupi",         cmd_setupi))
+        app.add_handler(CommandHandler("addadmin",       cmd_addadmin))
+        app.add_handler(CommandHandler("export",         cmd_export))
+
+        # 5. Verify callback BEFORE generic routers
+        app.add_handler(CallbackQueryHandler(cb_verify,  pattern=r"^verify_"))
+
+        # 6. Section callback routers (pattern-scoped for clarity)
+        app.add_handler(CallbackQueryHandler(cb_user,    pattern=r"^u_"))
+        app.add_handler(CallbackQueryHandler(cb_creator, pattern=r"^c_"))
+        app.add_handler(CallbackQueryHandler(cb_admin,   pattern=r"^(a_|bcast_)"))
+
+        # 7. Channel detection
+        app.add_handler(
+            ChatMemberHandler(handle_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER)
+        )
+
+        # 8. General message handler
+        app.add_handler(
+            MessageHandler(
+                (filters.TEXT | filters.PHOTO | filters.VIDEO | filters.Document.ALL)
+                & ~filters.COMMAND,
+                general_message_handler,
+            )
+        )
+
+        # 9. Unknown commands — must be last
+        app.add_handler(MessageHandler(filters.COMMAND, cmd_unknown))
+
+        # 10. Global error handler
+        app.add_error_handler(error_handler)
+
+        try:
+            logger.info(
+                "📡 Polling started… (attempt %d/%d)  —  %s",
+                attempt + 1, MAX_RETRIES + 1, now_str(),
+            )
+            app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
+            # run_polling() returned cleanly — normal shutdown, exit the loop
+            logger.info("✅ Polling stopped cleanly.")
+            break
+
+        except NetworkError as exc:
+            attempt += 1
+            delay = min(BACKOFF_BASE * (2 ** (attempt - 1)), BACKOFF_MAX)
+            if attempt > MAX_RETRIES:
+                logger.critical(
+                    "💀 Max retries (%d) exceeded after NetworkError. Giving up. Last error: %s",
+                    MAX_RETRIES, exc,
+                )
+                raise
+            logger.warning(
+                "🌐 NetworkError on attempt %d/%d: %s: %s — retrying in %ds  [%s]",
+                attempt, MAX_RETRIES + 1,
+                type(exc).__name__, exc,
+                delay, now_str(),
+            )
+            await asyncio.sleep(delay)
+
+        except TelegramError as exc:
+            attempt += 1
+            delay = min(BACKOFF_BASE * (2 ** (attempt - 1)), BACKOFF_MAX)
+            if attempt > MAX_RETRIES:
+                logger.critical(
+                    "💀 Max retries (%d) exceeded after TelegramError. Giving up. Last error: %s",
+                    MAX_RETRIES, exc,
+                )
+                raise
+            logger.error(
+                "⚠️  TelegramError on attempt %d/%d: %s: %s — retrying in %ds  [%s]",
+                attempt, MAX_RETRIES + 1,
+                type(exc).__name__, exc,
+                delay, now_str(),
+            )
+            await asyncio.sleep(delay)
+
+        except (KeyboardInterrupt, SystemExit):
+            logger.info("🛑 Shutdown signal received — stopping.")
+            break
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
