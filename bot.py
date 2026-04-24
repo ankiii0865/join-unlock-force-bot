@@ -38,7 +38,7 @@ from telegram import (
     Update,
 )
 from telegram.constants import ParseMode
-from telegram.error import BadRequest, Forbidden, TelegramError
+from telegram.error import BadRequest, Forbidden, NetworkError, TelegramError
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -635,6 +635,10 @@ def kb_back(to: str = "u_back") -> InlineKeyboardMarkup:
 
 def kb_cancel(cb: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data=cb)]])
+
+def kb_admin_back() -> InlineKeyboardMarkup:
+    """Back button that returns to the admin panel (a_panel callback)."""
+    return kb_back("a_panel")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3012,7 +3016,7 @@ async def post_init(app: Application):
     logger.info("🚀 ForceHub Bot started — %s", now_str())
 
 
-def main():
+async def main():
     if not BOT_TOKEN:
         logger.critical("❌ BOT_TOKEN not set! Check .env")
         return
@@ -3149,8 +3153,39 @@ def main():
     app.add_error_handler(error_handler)
 
     logger.info("📡 Polling started…")
-    app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
+
+    # ── Retry loop with exponential backoff for transient network errors ───────
+    max_retries  = 10
+    base_delay   = 5    # seconds
+    max_delay    = 60   # seconds
+    attempt      = 0
+
+    while True:
+        try:
+            app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
+            break  # clean exit — no retry needed
+        except (NetworkError, TelegramError) as exc:
+            attempt += 1
+            if attempt > max_retries:
+                logger.critical(
+                    "💀 Max retries (%d) exceeded. Last error: %s — giving up.",
+                    max_retries, exc,
+                )
+                raise
+            delay = min(base_delay * (2 ** (attempt - 1)), max_delay)
+            logger.warning(
+                "⚠️  [%s] Network error (attempt %d/%d): %s — retrying in %ds…",
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                attempt,
+                max_retries,
+                exc,
+                delay,
+            )
+            await asyncio.sleep(delay)
+            logger.info("🔄 Rebuilding application and reconnecting…")
+            # Rebuild the application so the underlying httpx client is fresh
+            app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
